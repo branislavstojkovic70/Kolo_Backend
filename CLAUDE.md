@@ -1,990 +1,699 @@
-# CLAUDE.md — SeatShare Backend
+# CLAUDE.md
 
 Guidance for Claude Code when working in this repository.
 
 ---
 
-## 1. What this project is
+## 1. Project
 
-**SeatShare** is a marketplace for shared subscription seats. A user (the **seller**) owns or is willing to open a group subscription plan — YouTube Premium Family, Spotify Duo/Family, Netflix, etc. — and posts a listing offering the remaining seats. Other users (the **buyers**) claim those seats and pay in crypto. The platform holds the money in escrow, releases it to the seller gradually over the subscription period, and takes a **4% fee**.
+**Digital Services Marketplace (escrow) — hackathon MVP backend.**
 
-Single-seat items (ChatGPT Plus, a Netflix account handover, etc.) are the same flow with `totalSeats = 1`.
+Users sell digital services/accounts (e.g. "YouTube Premium 1 year"). Buyers pay in crypto via
+OxaPay to **our** OxaPay merchant account. Funds are held in escrow with a **vesting period**
+(default 30 days) before the seller can withdraw them to their own crypto wallet. Buyers can open
+a **dispute**, which creates a Telegram discussion space between buyer, seller and admin and
+freezes the withdrawal. An admin decides who wins; the winner gets the money.
 
-**This is a hackathon project.** Optimize for a working demo, not for production hardening. When in doubt, pick the simpler option and leave a `// TODO(post-hackathon):` comment.
+### THIS IS A HACKATHON PROJECT
 
-### Stack
+Non-negotiable working rules:
 
-| Layer | Choice |
-|---|---|
-| Runtime | Node.js 20+, TypeScript (strict) |
-| Framework | NestJS 10 |
-| ORM | Prisma |
-| DB | PostgreSQL 16 |
-| Auth | Clerk (Google OAuth only for now) |
-| Payments | OxaPay (crypto) |
-| Jobs | `@nestjs/schedule` (in-process cron — no Redis, no BullMQ) |
-| Validation | `class-validator` + `class-transformer` |
-| Docs | `@nestjs/swagger` at `/docs` |
-| Frontend | React (separate repo/folder — not our concern here) |
-
-### Non-goals for the hackathon
-
-Do not build these unless explicitly asked:
-
-- Automated crypto payouts (withdrawals are **requested** in-app, an admin marks them sent manually)
-- Automated crypto refunds (refunds credit the buyer's **internal wallet balance**)
-- KYC, email/SMS notifications, ratings & reviews, chat outside disputes
-- Multi-currency accounting (everything is denominated in **USD cents**)
-- Rate limiting, caching, horizontal scaling, comprehensive test suites
+- **Speed > perfection.** Ship working endpoints. No premature abstraction.
+- **No unit tests, no e2e tests.** Do not write `*.spec.ts` files. Delete generated ones.
+- **No CQRS, no event bus, no repository pattern, no interfaces-for-everything.**
+  Controller → Service → PrismaService. That's it.
+- **No queues, no Redis, no workers.** Everything synchronous inside the request or in a webhook.
+- **No soft-delete / audit tables** beyond what is specified here.
+- Business rules live in **one** service each. Never duplicate the balance rules.
+- If something is ambiguous, pick the simplest option that works, add a `// TODO:` and keep going.
+  Don't stop to ask unless it's about money-moving logic.
 
 ---
 
-## 2. Domain model in plain language
+## 2. Stack
 
-Read this before touching money code. Every bug in this project will be a money bug.
+| Concern     | Choice                                                        |
+| ----------- | ------------------------------------------------------------- |
+| Runtime     | Node.js 20+, TypeScript                                       |
+| Framework   | NestJS 11                                                     |
+| DB          | PostgreSQL 16 (docker-compose locally)                        |
+| ORM         | Prisma (`@prisma/client`, `prisma`)                           |
+| Auth        | Clerk (`@clerk/backend`) — Google OAuth only, done on FE      |
+| Payments    | OxaPay Merchant API (invoices) + Payout API (withdrawals)     |
+| Disputes    | Telegram: GramJS (MTProto) creates the group, Bot API posts   |
+| Validation  | `class-validator` + `class-transformer`, global ValidationPipe |
+| Config      | `@nestjs/config` (`isGlobal: true`)                           |
+| Docs        | `@nestjs/swagger` at `/docs` (cheap, helps the FE team)       |
+| HTTP client | native `fetch` (Node 20) — do **not** add axios               |
 
-### The lifecycle of a listing
-
-1. A seller creates a **Listing**: service name, `totalSeats`, `pricePerSeat`, `durationDays` (how long the plan lasts, e.g. 30), and a `fillDeadline` (the date by which all seats must be sold).
-2. Buyers create **Orders** against the listing. Each order reserves one seat and creates an OxaPay invoice. The reservation has a short TTL (default 30 minutes) — if unpaid by then, the seat is freed.
-3. Money from a paid order goes into **escrow**, held by the platform. Nobody can touch it yet.
-4. **Path A — the listing fills before the deadline.** The listing goes `ACTIVE`. The seller delivers the invites. All escrows convert from `HELD` to `VESTING`: the seller's `lockedBalanceCents` goes up by the net amount (gross − 4% fee), and the fee is recorded to the platform.
-5. **Path B — the deadline passes with unsold seats.** The listing goes `EXPIRED`. Every escrow is refunded **in full, with no fee deducted** — the buyer gets back exactly what they paid, credited to their in-app wallet.
-6. When the vesting period ends (`activatedAt + durationDays`), the escrow is `RELEASED` and the seller's money moves from `lockedBalanceCents` to `availableBalanceCents`. Only then can it be withdrawn.
-7. At any point during an active order, either side can open a **Dispute**. Opening a dispute **freezes** that order's escrow so vesting cannot release it. An admin resolves the dispute in favour of the buyer, the seller, or a split.
-
-### The 4% fee
-
-- Constant: `PLATFORM_FEE_BPS = 400` (basis points). Snapshotted onto every order as `platformFeeBps` so historical orders stay correct if the rate changes.
-- `feeCents = Math.round(amountCents * platformFeeBps / 10_000)`
-- `netCents = amountCents - feeCents`
-- **The buyer always pays the sticker price.** The fee comes out of the seller's payout.
-- **No fee is taken on a refund.** If a listing expires unfilled or an admin rules for the buyer, the buyer is made whole for the full gross amount and the platform earns nothing.
-
-### Why vesting exists
-
-The seller could remove a buyer from the family plan on day 2 and walk away with 30 days of money. Vesting means the seller's funds unlock only after the plan period they sold has actually elapsed, which gives the buyer a window to open a dispute against money that is still recoverable.
-
-For the demo, `VESTING_SPEEDUP` in env lets you compress "30 days" into "30 seconds". Use it.
+Package manager: **npm**.
 
 ---
 
-## 3. Money handling rules
+## 3. Money model & core rules (READ BEFORE TOUCHING ANY MONEY CODE)
 
-**Non-negotiable. Violating any of these is a bug even if tests pass.**
+- All internal accounting is in **USD**, stored as Prisma `Decimal(18, 2)`.
+- We assume **1 USDT = 1 USD** for payouts. Documented shortcut, fine for the hackathon.
+- **Never** compute balances with JS floats. Use `Prisma.Decimal` / `decimal.js` arithmetic.
+- The platform holds all funds on **our** OxaPay account. Users have no wallets in our DB —
+  a user's balance is **always derived from Orders**, never stored as a mutable column.
 
-1. **All money is `Int` cents, USD.** Never `Float`, never `Decimal`, never a JS `number` holding dollars. Field names always end in `Cents`. The API accepts and returns cents; the React frontend formats for display.
-2. **The `Ledger` table is the source of truth.** `Wallet.availableBalanceCents` and `Wallet.lockedBalanceCents` are denormalized caches. Every single balance mutation writes a `Ledger` row *and* updates the wallet **inside the same Prisma `$transaction`**. There is no code path that changes a wallet without a matching ledger entry.
-3. **Ledger entries are append-only.** Never update or delete a `Ledger` row. Corrections are new, opposite-signed rows.
-4. **Every ledger entry's sum must be zero across parties.** Money moving to a seller comes out of escrow; a fee moves to the platform account (`userId = null`). If you write one row you almost certainly owe another.
-5. **Webhooks are idempotent.** Every OxaPay callback is written to `WebhookEvent` with a unique `(provider, externalId, status)` key first. If the insert conflicts, return 200 immediately and do nothing else. OxaPay retries up to 5 times and sends `paying` before `paid`.
-6. **Seat reservation is race-sensitive.** Creating an order must lock the listing row: inside a transaction, run `SELECT ... FOR UPDATE` on the listing (Prisma: `$queryRaw` with `FOR UPDATE`), recount live orders, and only then insert. Two buyers clicking simultaneously on the last seat must not both succeed.
-7. **Never trust the amount in a webhook payload for authorization.** Look the order up by your own `orderId`, compare the paid amount to the expected amount, and reject/flag underpayments rather than silently accepting.
+### Order lifecycle
+
+```
+PENDING_PAYMENT ──(oxapay webhook: paid)──> PAID ──(vesting passes)──> withdrawable by seller
+       │                                      │
+       │                                      ├──(buyer opens dispute)──> DISPUTED
+  (expired/failed)                            │        │
+       ↓                                      │        ├─ admin: SELLER wins → back to PAID
+    EXPIRED                                   │        └─ admin: BUYER wins  → REFUNDED
+                                              │                (beneficiary = buyer,
+                                              │                 vestedAt = now)
+                                              └──(withdrawn)──> withdrawal linked
+```
+
+### The single source of truth: withdrawable funds
+
+An order's `sellerAmountUsd` is **withdrawable by user U** if and only if:
+
+1. `order.status IN (PAID, REFUNDED)`
+2. `order.beneficiaryId === U.id`
+3. `order.vestedAt <= now()`
+4. the order has **no dispute with status OPEN**
+5. `order.withdrawalId IS NULL`
+
+This rule is implemented **once**, in `WalletService.getWithdrawableOrders(userId)`.
+`getBalance()` and `createWithdrawal()` both call it. Do not re-implement it anywhere.
+
+Balance buckets returned to the FE:
+
+- `available` — passes all 5 rules above
+- `vesting` — status `PAID`, beneficiary = U, no open dispute, `vestedAt > now()`
+- `disputed` — beneficiary = U, has an `OPEN` dispute
+- `withdrawing` — linked to a withdrawal that is `PENDING` or `PROCESSING`
+- `withdrawn` — linked to a `COMPLETED` withdrawal
+
+### Vesting
+
+- `VESTING_DAYS` env, default `30`.
+- Set **per payment**: on the paid webhook → `vestedAt = paidAt + VESTING_DAYS days`.
+- Never recalculated globally. Changing the env later must not affect existing orders.
+- Add `VESTING_DAYS=0` support so the demo can be shown live.
+
+### Dispute rules
+
+- Only the **buyer** can open a dispute, only on an order with status `PAID`,
+  only if no dispute exists yet, and only within `DISPUTE_WINDOW_DAYS` (default 30) of `paidAt`.
+- Opening a dispute sets `order.status = DISPUTED`. Withdrawal is blocked **even if vesting passed**.
+- Admin resolves:
+  - **SELLER wins** → `dispute.status = RESOLVED_SELLER`, `order.status = PAID`,
+    beneficiary stays the seller, `vestedAt` **unchanged** (if vesting hasn't passed, he waits).
+  - **BUYER wins** → `dispute.status = RESOLVED_BUYER`, `order.status = REFUNDED`,
+    `order.beneficiaryId = buyerId`, `order.vestedAt = now()` (buyer can withdraw immediately).
+- The refund is a **withdrawal by the buyer** from our OxaPay balance — we never call an
+  OxaPay "refund" API. Buyer withdraws exactly like a seller does.
+
+### Withdrawals
+
+- **MVP: withdraw the full `available` bucket.** No `amount` parameter. The user supplies only
+  `address`, `network` and optionally `currency` (default `USDT`).
+  Rationale: partial withdrawals would require splitting order amounts. Not worth it today.
+- **"Available" does NOT mean "everything the user earned".** It means *only the orders that
+  individually passed their own vesting* (all 5 rules above). Orders still vesting, or under an
+  open dispute, are simply not part of the query result — they cannot be dragged along.
+- **Vesting is per-order, frozen at payment time.** It is never derived from the user's latest
+  sale, never recalculated, never averaged across orders. Two orders of the same seller routinely
+  have different `vestedAt` values and that is the whole point.
+
+Worked example — seller has three paid orders, `VESTING_DAYS=30`, today is day 0:
+
+| Order | Paid       | `vestedAt` | `sellerAmountUsd` | Bucket    |
+| ----- | ---------- | ---------- | ----------------- | --------- |
+| A     | 45 days ago | day −15   | 20.00             | available |
+| B     | 20 days ago | day +10   | 35.00             | vesting   |
+| C     | 2 days ago  | day +28   | 10.00             | vesting   |
+
+`GET /wallet/balance` → `available: "20.00"`, `vesting: "45.00"`.
+`POST /wallet/withdraw` pays out **20.00** and links only order A to the `Withdrawal`.
+B and C stay untouched and become withdrawable on their own dates, in two later withdrawals.
+If A were under an open dispute instead, `available` would be `"0.00"` and the withdraw call
+would return 400.
+- Flow (all inside one Prisma `$transaction` where possible):
+  1. Load withdrawable orders. If empty or sum < `MIN_WITHDRAWAL_USD` (default `1`) → 400.
+  2. Create `Withdrawal` row, status `PENDING`, `amountUsd = sum`.
+  3. Set `withdrawalId` on those orders (this "reserves" them — prevents double-spend).
+  4. Call OxaPay payout **after** the transaction commits.
+  5. On success → status `PROCESSING` + save `oxapayTrackId`.
+     On API error → status `FAILED`, `error = message`, and **unlink the orders**
+     (`withdrawalId = null`) so the funds become available again.
+  6. Payout webhook flips `PROCESSING → COMPLETED` (or `FAILED` + unlink).
 
 ---
 
-## 4. Database schema (Prisma)
+## 4. Database (Prisma schema)
 
-Full `prisma/schema.prisma`. Table names are snake_case via `@@map`; TS field names stay camelCase.
+`prisma/schema.prisma`. Use `cuid()` ids. Every model has `createdAt` / `updatedAt`.
 
 ```prisma
-generator client {
-  provider = "prisma-client-js"
-}
-
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-// ─────────────────────────── enums ───────────────────────────
-
-enum Role {
-  USER
-  ADMIN
-}
-
-enum ListingType {
-  GROUP   // multiple seats, e.g. YouTube Premium Family
-  SINGLE  // exactly one seat, e.g. ChatGPT Plus
-}
-
-enum ListingStatus {
-  OPEN        // accepting orders
-  FILLED      // all seats paid, awaiting seller delivery
-  ACTIVE      // delivered; vesting clock running
-  COMPLETED   // vesting finished, all escrows released
-  EXPIRED     // fillDeadline passed unfilled -> everything refunded
-  CANCELLED   // seller or admin cancelled -> everything refunded
-}
-
-enum OrderStatus {
-  PENDING_PAYMENT  // invoice created, seat reserved with TTL
-  PAID             // funds in escrow, waiting for the listing to fill
-  ACTIVE           // listing active, seat delivered/deliverable
-  COMPLETED        // vesting done, seller paid out
-  DISPUTED         // dispute open on this order, escrow frozen
-  REFUNDED         // buyer made whole
-  EXPIRED          // reservation TTL elapsed without payment
-  CANCELLED        // buyer cancelled before paying
-}
-
-enum PaymentStatus {
-  NEW
-  WAITING     // OxaPay "waiting" — invoice created, nothing received
-  CONFIRMING  // OxaPay "paying"/"confirming" — tx seen, not final
-  PAID
-  UNDERPAID
-  EXPIRED
-  FAILED
-}
-
-enum EscrowStatus {
-  HELD      // buyer paid, listing not yet active
-  VESTING   // listing active, funds locked on the seller's wallet
-  FROZEN    // dispute open, release blocked
-  RELEASED  // seller can withdraw
-  REFUNDED  // returned to the buyer
-}
-
-enum DisputeStatus {
-  OPEN
-  UNDER_REVIEW
-  RESOLVED_BUYER   // full refund to buyer
-  RESOLVED_SELLER  // funds continue vesting / release to seller
-  RESOLVED_SPLIT   // partial refund
-  CANCELLED        // withdrawn by the opener
-}
-
-enum DisputeReason {
-  SEAT_NOT_DELIVERED
-  SEAT_REVOKED
-  CREDENTIALS_INVALID
-  SERVICE_NOT_AS_DESCRIBED
-  BUYER_ABUSE
-  OTHER
-}
-
-enum LedgerType {
-  ESCROW_IN            // buyer's payment enters platform escrow
-  PLATFORM_FEE         // 4% to the platform account
-  VEST_LOCK            // net amount locked on the seller's wallet
-  VEST_RELEASE         // locked -> available on the seller's wallet
-  REFUND_CREDIT        // gross credited to the buyer's available balance
-  PAYOUT_DEBIT         // available -> outgoing withdrawal
-  PAYOUT_REVERSAL      // rejected withdrawal returned
-  DISPUTE_ADJUSTMENT   // admin-driven correction
-}
-
-enum BalanceBucket {
-  AVAILABLE
-  LOCKED
-  ESCROW    // platform-held, not attributable to a user wallet yet
-}
-
-enum PayoutStatus {
-  REQUESTED
-  APPROVED
-  SENT
-  REJECTED
-}
-
-// ─────────────────────────── core ───────────────────────────
+enum Role            { USER ADMIN }
+enum ListingStatus   { ACTIVE PAUSED DELETED }
+enum OrderStatus     { PENDING_PAYMENT PAID DISPUTED REFUNDED EXPIRED }
+enum DisputeStatus   { OPEN RESOLVED_BUYER RESOLVED_SELLER }
+enum WithdrawalStatus{ PENDING PROCESSING COMPLETED FAILED }
 
 model User {
-  id          String   @id @default(uuid())
-  clerkId     String   @unique
-  email       String   @unique
-  displayName String?
-  avatarUrl   String?
-  role        Role     @default(USER)
-  bannedAt    DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id               String  @id @default(cuid())
+  clerkUserId      String  @unique          // subject from the Clerk JWT
+  email            String  @unique
+  username         String?                  // display name
+  imageUrl         String?
+  telegramUsername String?                  // informational only — shown in the dispute group's
+                                            // opening message. NOT used to add anyone to a group.
+  role             Role    @default(USER)
 
-  wallet            Wallet?
-  listings          Listing[]        @relation("SellerListings")
-  orders            Order[]          @relation("BuyerOrders")
-  ledgerEntries     Ledger[]
-  payouts           Payout[]
-  disputesOpened    Dispute[]        @relation("DisputeOpener")
-  disputesAgainst   Dispute[]        @relation("DisputeRespondent")
-  disputesResolved  Dispute[]        @relation("DisputeResolver")
-  disputeMessages   DisputeMessage[]
-
-  @@map("users")
-}
-
-model Wallet {
-  id                   String   @id @default(uuid())
-  userId               String   @unique
-  availableBalanceCents Int     @default(0)  // withdrawable
-  lockedBalanceCents    Int     @default(0)  // vesting, not yet withdrawable
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("wallets")
+  listings        Listing[]
+  purchases       Order[]  @relation("buyer")
+  sales           Order[]  @relation("seller")
+  beneficiaryOf   Order[]  @relation("beneficiary")
+  withdrawals     Withdrawal[]
+  openedDisputes  Dispute[] @relation("openedBy")
+  resolvedDisputes Dispute[] @relation("resolvedBy")
 }
 
 model Listing {
-  id             String        @id @default(uuid())
-  sellerId       String
-  title          String
-  description    String?
-  serviceName    String        // free text: "YouTube Premium Family", "ChatGPT Plus"
-  serviceSlug    String        // normalized for filtering: "youtube-premium"
-  type           ListingType
-  totalSeats     Int           // always 1 when type = SINGLE
-  pricePerSeatCents Int
-  durationDays   Int           // plan length -> drives the vesting window
-  fillDeadline   DateTime      // all seats must be sold by this moment
-  status         ListingStatus @default(OPEN)
+  id          String        @id @default(cuid())
+  sellerId    String
+  seller      User          @relation(fields: [sellerId], references: [id])
+  title       String
+  description String
+  category    String?       // free text, no separate table
+  priceUsd    Decimal       @db.Decimal(18, 2)
+  // shown to the buyer only after payment (credentials, instructions, contact)
+  deliveryInfo String?
+  status      ListingStatus @default(ACTIVE)
+  orders      Order[]
 
-  activatedAt DateTime?  // set when the listing fills and the seller delivers
-  expiresAt   DateTime?  // activatedAt + durationDays
-  cancelledAt DateTime?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  seller   User      @relation("SellerListings", fields: [sellerId], references: [id])
-  orders   Order[]
-  escrows  Escrow[]
-  disputes Dispute[]
-
-  @@index([status, fillDeadline])
-  @@index([serviceSlug, status])
+  @@index([status, createdAt])
   @@index([sellerId])
-  @@map("listings")
 }
 
 model Order {
-  id        String      @id @default(uuid())
+  id        String      @id @default(cuid())
   listingId String
+  listing   Listing     @relation(fields: [listingId], references: [id])
   buyerId   String
-  status    OrderStatus @default(PENDING_PAYMENT)
-
-  // price snapshot — never read the live listing price for an existing order
-  amountCents     Int
-  platformFeeBps  Int @default(400)
-  feeCents        Int
-  netCents        Int
-
-  reservationExpiresAt DateTime  // now + ORDER_RESERVATION_MINUTES
-  paidAt               DateTime?
-
-  // seat delivery
-  buyerContact String?   // email/handle the seller should invite
-  deliveredAt  DateTime? // seller marked as delivered
-  confirmedAt  DateTime? // buyer confirmed receipt (informational only)
-  deliveryNote String?   // invite link or instructions from the seller
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  listing  Listing   @relation(fields: [listingId], references: [id])
-  buyer    User      @relation("BuyerOrders", fields: [buyerId], references: [id])
-  payment  Payment?
-  escrow   Escrow?
-  disputes Dispute[]
-
-  // one live claim per buyer per listing; enforce the "live" part in code
-  @@unique([listingId, buyerId])
-  @@index([status, reservationExpiresAt])
-  @@index([buyerId])
-  @@map("orders")
-}
-
-model Payment {
-  id       String        @id @default(uuid())
-  orderId  String        @unique
-  provider String        @default("OXAPAY")
-  status   PaymentStatus @default(NEW)
-
-  providerTrackId String? @unique  // OxaPay track_id
-  payLink         String?
-
-  amountRequestedCents Int
-  amountPaidCents      Int     @default(0)
-  payCurrency          String? // e.g. "USDT", "BTC"
-  txHash               String?
-
-  expiresAt DateTime?
-  paidAt    DateTime?
-  rawPayload Json?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  order Order @relation(fields: [orderId], references: [id])
-
-  @@map("payments")
-}
-
-model Escrow {
-  id        String       @id @default(uuid())
-  orderId   String       @unique
-  listingId String
-  buyerId   String
+  buyer     User        @relation("buyer", fields: [buyerId], references: [id])
   sellerId  String
-  status    EscrowStatus @default(HELD)
+  seller    User        @relation("seller", fields: [sellerId], references: [id])
 
-  grossCents Int
-  feeCents   Int
-  netCents   Int
+  // snapshot at purchase time — listing may change later
+  titleSnapshot   String
+  amountUsd       Decimal @db.Decimal(18, 2)  // what the buyer pays
+  feeUsd          Decimal @db.Decimal(18, 2)  // platform fee
+  sellerAmountUsd Decimal @db.Decimal(18, 2)  // amount - fee = escrowed amount
 
-  vestingStartsAt DateTime?
-  vestingEndsAt   DateTime?
-  releasedAt      DateTime?
-  refundedAt      DateTime?
-  refundedCents   Int      @default(0)
+  status OrderStatus @default(PENDING_PAYMENT)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  // who is allowed to withdraw sellerAmountUsd (seller by default, buyer if he wins a dispute)
+  beneficiaryId String
+  beneficiary   User   @relation("beneficiary", fields: [beneficiaryId], references: [id])
 
-  order   Order   @relation(fields: [orderId], references: [id])
-  listing Listing @relation(fields: [listingId], references: [id])
+  oxapayTrackId String?  @unique
+  paymentUrl    String?
+  paidAt        DateTime?
+  vestedAt      DateTime?      // paidAt + VESTING_DAYS
 
-  @@index([status, vestingEndsAt])
-  @@index([sellerId])
-  @@map("escrows")
-}
+  withdrawalId String?
+  withdrawal   Withdrawal? @relation(fields: [withdrawalId], references: [id])
 
-model Ledger {
-  id     String        @id @default(uuid())
-  userId String?       // null = the platform's own account (fees)
-  type   LedgerType
-  bucket BalanceBucket
-  // signed: positive = into this bucket, negative = out of it
-  amountCents Int
+  dispute Dispute?
 
-  refType String? // "order" | "escrow" | "payout" | "dispute"
-  refId   String?
-  memo    String?
-
-  createdAt DateTime @default(now())
-
-  user User? @relation(fields: [userId], references: [id])
-
-  @@index([userId, createdAt])
-  @@index([refType, refId])
-  @@map("ledger_entries")
+  @@index([buyerId, createdAt])
+  @@index([sellerId, createdAt])
+  @@index([beneficiaryId, status])
 }
 
 model Dispute {
-  id        String        @id @default(uuid())
-  orderId   String
-  listingId String
+  id       String        @id @default(cuid())
+  orderId  String        @unique
+  order    Order         @relation(fields: [orderId], references: [id])
   openedById String
-  againstId  String
-  reason    DisputeReason
-  status    DisputeStatus @default(OPEN)
-  description String
+  openedBy   User        @relation("openedBy", fields: [openedById], references: [id])
+  reason   String
+  status   DisputeStatus @default(OPEN)
 
-  resolvedById  String?
-  resolvedAt    DateTime?
+  telegramChatId     String?   // group id returned by MTProto (store as string, it can change)
+  telegramInviteLink String?   // durable handle, shown to buyer & seller in the UI
+
+  resolvedById String?
+  resolvedBy   User?   @relation("resolvedBy", fields: [resolvedById], references: [id])
   resolutionNote String?
-  refundCents   Int       @default(0) // amount returned to the buyer on resolution
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  order      Order            @relation(fields: [orderId], references: [id])
-  listing    Listing          @relation(fields: [listingId], references: [id])
-  openedBy   User             @relation("DisputeOpener", fields: [openedById], references: [id])
-  against    User             @relation("DisputeRespondent", fields: [againstId], references: [id])
-  resolvedBy User?            @relation("DisputeResolver", fields: [resolvedById], references: [id])
-  messages   DisputeMessage[]
-
-  @@index([status, createdAt])
-  @@index([orderId])
-  @@map("disputes")
+  resolvedAt   DateTime?
 }
 
-model DisputeMessage {
-  id        String   @id @default(uuid())
-  disputeId String
-  authorId  String
-  body      String
-  attachments Json?  // [{ url, filename }] — URLs only, no uploads for the hackathon
-  isInternal Boolean @default(false) // admin-only note, hidden from the parties
-  createdAt DateTime @default(now())
-
-  dispute Dispute @relation(fields: [disputeId], references: [id], onDelete: Cascade)
-  author  User    @relation(fields: [authorId], references: [id])
-
-  @@index([disputeId, createdAt])
-  @@map("dispute_messages")
+model Withdrawal {
+  id       String           @id @default(cuid())
+  userId   String
+  user     User             @relation(fields: [userId], references: [id])
+  amountUsd Decimal         @db.Decimal(18, 2)
+  currency String           @default("USDT")
+  network  String           // TRC20 / BEP20 / TON ...
+  address  String
+  status   WithdrawalStatus @default(PENDING)
+  oxapayTrackId String?     @unique
+  error    String?
+  completedAt DateTime?
+  orders   Order[]
 }
 
-model Payout {
-  id     String       @id @default(uuid())
-  userId String
-  amountCents Int
-  status PayoutStatus @default(REQUESTED)
-
-  address  String  // crypto address supplied by the user
-  network  String  // "TRC20", "ERC20", "BTC", ...
-  txHash   String?
-  adminNote String?
-
-  processedById String?
-  processedAt   DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  user User @relation(fields: [userId], references: [id])
-
-  @@index([status, createdAt])
-  @@map("payouts")
-}
-
+// idempotency guard for OxaPay callbacks
 model WebhookEvent {
-  id         String   @id @default(uuid())
-  provider   String   @default("OXAPAY")
-  externalId String   // OxaPay track_id
-  status     String   // payload status, so "paying" and "paid" are distinct events
-  payload    Json
-  processedAt DateTime?
-  error      String?
-  createdAt  DateTime @default(now())
+  id        String   @id @default(cuid())
+  provider  String   @default("oxapay")
+  type      String   // payment | payout
+  trackId   String
+  status    String
+  payload   Json
+  createdAt DateTime @default(now())
 
-  @@unique([provider, externalId, status])
-  @@map("webhook_events")
+  @@unique([provider, type, trackId, status])
 }
 ```
 
----
-
-## 5. State machines
-
-Implement these as explicit guard functions in each module's service (e.g. `assertTransition(from, to)`). Do not scatter status checks through controllers.
-
-### Listing
-
-```
-OPEN ──(all seats paid)──────────> FILLED ──(seller delivers)──> ACTIVE
- │                                   │                             │
- │                                   └──(admin/seller cancel)──┐    └──(vesting done on all escrows)──> COMPLETED
- │                                                             │
- ├──(fillDeadline passed, unfilled)──> EXPIRED                 └──> CANCELLED
- └──(seller cancels, no paid orders)─> CANCELLED
-```
-
-`EXPIRED` and `CANCELLED` both trigger a full refund of every `HELD` escrow.
-
-### Order
-
-```
-PENDING_PAYMENT ──(webhook paid)──> PAID ──(listing ACTIVE)──> ACTIVE ──(vesting released)──> COMPLETED
-      │                              │                           │
-      │                              └──(listing EXPIRED/CANCELLED)──> REFUNDED
-      ├──(TTL elapsed)──> EXPIRED    │                           │
-      └──(buyer cancels)──> CANCELLED└───────────────────────────┴──(dispute opened)──> DISPUTED
-                                                                              │
-                                                        ┌─────────────────────┴──────────────────┐
-                                                   RESOLVED_BUYER                          RESOLVED_SELLER
-                                                    -> REFUNDED                         -> ACTIVE/COMPLETED
-```
-
-### Escrow
-
-```
-HELD ──(listing ACTIVE)──> VESTING ──(vestingEndsAt passed)──> RELEASED
-  │                           │
-  │                           ├──(dispute opened)──> FROZEN ──(admin resolves)──> RELEASED | REFUNDED
-  └──(listing EXPIRED/CANCELLED)────────────────────> REFUNDED
-```
+Migrations: `npx prisma migrate dev --name <name>`. Client is generated to the default location.
 
 ---
 
-## 6. Money flows, step by step
-
-Each numbered block is one Prisma `$transaction`. Write them exactly like this.
-
-### 6.1 Buyer pays (webhook `status = paid`)
+## 5. File structure
 
 ```
-order.status              PENDING_PAYMENT -> PAID
-order.paidAt              = now
-payment.status            -> PAID
-escrow created            status = HELD, gross/fee/net snapshotted from the order
-
-Ledger:
-  { userId: null, type: ESCROW_IN, bucket: ESCROW, amount: +gross, ref: escrow }
+prisma/
+  schema.prisma
+  seed.ts                        # admin user + a few demo listings
+src/
+  main.ts                        # ValidationPipe, CORS, Swagger, RAW BODY for webhooks
+  app.module.ts
+  config/
+    configuration.ts             # typed config() factory
+    env.validation.ts            # class-validator on process.env, fail fast
+  prisma/
+    prisma.module.ts             # @Global()
+    prisma.service.ts
+  common/
+    guards/clerk-auth.guard.ts   # verifies Clerk JWT, upserts + attaches user
+    guards/admin.guard.ts        # requires role === ADMIN
+    decorators/current-user.decorator.ts
+    decorators/public.decorator.ts   # @Public() to skip auth (webhooks, listings feed)
+    dto/pagination.dto.ts
+    money.ts                     # Decimal helpers: sum(), toFixed2(), calcFee()
+  modules/
+    users/       users.module.ts   users.controller.ts   users.service.ts   dto/
+    listings/    listings.module.ts listings.controller.ts listings.service.ts dto/
+    orders/      orders.module.ts  orders.controller.ts  orders.service.ts  dto/
+    wallet/      wallet.module.ts  wallet.controller.ts  wallet.service.ts  dto/
+    disputes/    disputes.module.ts disputes.controller.ts disputes.service.ts dto/
+    admin/       admin.module.ts   admin.controller.ts   admin.service.ts   dto/
+    payments/    payments.module.ts oxapay.service.ts    webhooks.controller.ts
+    telegram/    telegram.module.ts telegram.service.ts
 ```
 
-Then, still inside the same transaction, recount paid orders. If `paidCount === listing.totalSeats`, move the listing to `FILLED`.
-
-### 6.2 Listing activates (seller delivers, or auto-activate on fill)
-
-```
-listing.status     FILLED -> ACTIVE
-listing.activatedAt = now
-listing.expiresAt   = now + durationDays
-
-for each escrow where status = HELD:
-  escrow.status          -> VESTING
-  escrow.vestingStartsAt = listing.activatedAt
-  escrow.vestingEndsAt   = listing.expiresAt
-  order.status           PAID -> ACTIVE
-  seller.wallet.lockedBalanceCents += net
-
-  Ledger:
-    { userId: null,     type: ESCROW_IN,    bucket: ESCROW,  amount: -gross }
-    { userId: null,     type: PLATFORM_FEE, bucket: AVAILABLE, amount: +fee  }  // platform account
-    { userId: sellerId, type: VEST_LOCK,    bucket: LOCKED,  amount: +net   }
-```
-
-### 6.3 Vesting releases (cron)
-
-```
-escrow.status  VESTING -> RELEASED   (skip anything FROZEN)
-escrow.releasedAt = now
-order.status   ACTIVE -> COMPLETED
-seller.wallet.lockedBalanceCents    -= net
-seller.wallet.availableBalanceCents += net
-
-Ledger:
-  { userId: sellerId, type: VEST_RELEASE, bucket: LOCKED,    amount: -net }
-  { userId: sellerId, type: VEST_RELEASE, bucket: AVAILABLE, amount: +net }
-```
-
-When the last escrow on a listing releases, set `listing.status = COMPLETED`.
-
-### 6.4 Deadline missed — refund with no fee (cron)
-
-```
-listing.status OPEN -> EXPIRED
-
-for each escrow where status = HELD:
-  escrow.status        -> REFUNDED
-  escrow.refundedCents = gross          // full gross, fee NOT deducted
-  order.status         -> REFUNDED
-  buyer.wallet.availableBalanceCents += gross
-
-  Ledger:
-    { userId: null,    type: ESCROW_IN,     bucket: ESCROW,    amount: -gross }
-    { userId: buyerId, type: REFUND_CREDIT, bucket: AVAILABLE, amount: +gross }
-```
-
-No `PLATFORM_FEE` row is ever written on this path.
-
-### 6.5 Dispute resolution
-
-- **`RESOLVED_SELLER`** — unfreeze: `escrow.status FROZEN -> VESTING`, order back to `ACTIVE`. Normal vesting resumes.
-- **`RESOLVED_BUYER`** — full `net` comes off the seller's locked balance, `gross` is credited to the buyer, and the platform gives back its `fee`:
-
-```
-escrow.status -> REFUNDED
-seller.wallet.lockedBalanceCents -= net
-buyer.wallet.availableBalanceCents += gross
-
-Ledger:
-  { userId: sellerId, type: DISPUTE_ADJUSTMENT, bucket: LOCKED,    amount: -net   }
-  { userId: null,     type: DISPUTE_ADJUSTMENT, bucket: AVAILABLE, amount: -fee   }  // fee reversed
-  { userId: buyerId,  type: DISPUTE_ADJUSTMENT, bucket: AVAILABLE, amount: +gross }
-```
-
-- **`RESOLVED_SPLIT`** — admin supplies `refundCents` (must be `0 < refundCents < gross`). Refund that much to the buyer from the seller's locked balance; the remainder keeps vesting. Keep the fee proportional: `keptFee = round(fee * (gross - refundCents) / gross)`.
-
-Guard: if `seller.wallet.lockedBalanceCents < amountToClaw`, clamp to what is available and write an `adminNote`. Log loudly. This should not happen — vesting must never release a frozen escrow.
+Rules:
+- `ClerkAuthGuard` is registered as a **global** `APP_GUARD`; opt out with `@Public()`.
+- `PrismaModule` is `@Global()` — never import it in feature modules.
+- DTOs always use `class-validator`. Never accept raw `any` bodies (except webhooks).
+- Controllers do no business logic. Services do no HTTP concerns.
 
 ---
 
-## 7. File structure
+## 6. API surface
 
-```
-backend/
-├── prisma/
-│   ├── schema.prisma
-│   ├── migrations/
-│   └── seed.ts                      # demo users, listings, an admin
-├── src/
-│   ├── main.ts                      # bootstrap, CORS, ValidationPipe, Swagger, raw-body for webhooks
-│   ├── app.module.ts
-│   │
-│   ├── config/
-│   │   ├── configuration.ts         # typed config factory
-│   │   └── env.validation.ts        # Joi/zod schema — fail fast on boot
-│   │
-│   ├── prisma/
-│   │   ├── prisma.module.ts         # @Global
-│   │   └── prisma.service.ts
-│   │
-│   ├── common/
-│   │   ├── constants.ts             # PLATFORM_FEE_BPS, ORDER_RESERVATION_MINUTES
-│   │   ├── decorators/
-│   │   │   ├── current-user.decorator.ts
-│   │   │   ├── public.decorator.ts       # @Public() skips the auth guard
-│   │   │   └── roles.decorator.ts
-│   │   ├── guards/
-│   │   │   ├── clerk-auth.guard.ts       # global guard
-│   │   │   └── roles.guard.ts
-│   │   ├── filters/
-│   │   │   └── all-exceptions.filter.ts
-│   │   ├── interceptors/
-│   │   │   └── logging.interceptor.ts
-│   │   └── dto/
-│   │       └── pagination.dto.ts
-│   │
-│   ├── modules/
-│   │   ├── auth/
-│   │   │   ├── auth.module.ts
-│   │   │   ├── auth.service.ts           # verify Clerk JWT, JIT-provision the local User
-│   │   │   └── auth.controller.ts        # GET /me
-│   │   │
-│   │   ├── users/
-│   │   │   ├── users.module.ts
-│   │   │   ├── users.service.ts
-│   │   │   ├── users.controller.ts
-│   │   │   └── dto/update-profile.dto.ts
-│   │   │
-│   │   ├── listings/
-│   │   │   ├── listings.module.ts
-│   │   │   ├── listings.service.ts
-│   │   │   ├── listings.controller.ts
-│   │   │   ├── listing-state.ts          # transition guards
-│   │   │   └── dto/
-│   │   │       ├── create-listing.dto.ts
-│   │   │       ├── update-listing.dto.ts
-│   │   │       └── query-listings.dto.ts
-│   │   │
-│   │   ├── orders/
-│   │   │   ├── orders.module.ts
-│   │   │   ├── orders.service.ts         # seat reservation w/ row lock
-│   │   │   ├── orders.controller.ts
-│   │   │   └── dto/
-│   │   │       ├── create-order.dto.ts
-│   │   │       └── deliver-seat.dto.ts
-│   │   │
-│   │   ├── payments/
-│   │   │   ├── payments.module.ts
-│   │   │   ├── payments.service.ts
-│   │   │   ├── payments.controller.ts
-│   │   │   ├── webhooks.controller.ts    # POST /webhooks/oxapay
-│   │   │   └── oxapay/
-│   │   │       ├── oxapay.client.ts      # HTTP wrapper
-│   │   │       ├── oxapay.types.ts
-│   │   │       └── oxapay.hmac.ts        # sha512 raw-body verification
-│   │   │
-│   │   ├── escrow/
-│   │   │   ├── escrow.module.ts
-│   │   │   ├── escrow.service.ts         # HELD/VESTING/FROZEN/RELEASED/REFUNDED
-│   │   │   └── ledger.service.ts         # THE ONLY place that mutates wallets
-│   │   │
-│   │   ├── wallet/
-│   │   │   ├── wallet.module.ts
-│   │   │   ├── wallet.service.ts
-│   │   │   ├── wallet.controller.ts
-│   │   │   └── dto/request-payout.dto.ts
-│   │   │
-│   │   ├── disputes/
-│   │   │   ├── disputes.module.ts
-│   │   │   ├── disputes.service.ts
-│   │   │   ├── disputes.controller.ts
-│   │   │   └── dto/
-│   │   │       ├── create-dispute.dto.ts
-│   │   │       ├── post-message.dto.ts
-│   │   │       └── resolve-dispute.dto.ts
-│   │   │
-│   │   ├── admin/
-│   │   │   ├── admin.module.ts
-│   │   │   ├── admin.controller.ts       # @Roles(ADMIN) on the whole controller
-│   │   │   └── admin.service.ts          # stats, dispute queue, payout queue
-│   │   │
-│   │   └── jobs/
-│   │       ├── jobs.module.ts
-│   │       └── jobs.service.ts           # all four crons live here
-│   │
-│   └── types/
-│       └── express.d.ts                  # req.user augmentation
-├── test/
-│   └── money-flow.e2e-spec.ts            # one happy path + one refund path, if time allows
-├── .env.example
-├── docker-compose.yml                    # postgres only
-├── nest-cli.json
-├── tsconfig.json
-└── package.json
-```
+All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
 
-### Module dependency rules
+### Users
+- `GET  /api/me` → current user (auto-created on first authenticated request)
+- `PATCH /api/me` → `{ username?, telegramUsername? }`
 
-- `LedgerService` is the **only** class allowed to write `Ledger` rows or touch `Wallet` balances. Everything else calls it.
-- `EscrowService` owns escrow status transitions and calls `LedgerService`.
-- `PaymentsService` never touches wallets directly — it flips payment/order status and calls `EscrowService`.
-- `JobsService` calls into `ListingsService`, `OrdersService`, and `EscrowService`. It contains no business logic itself, only scheduling and iteration.
-- No circular imports. If two modules need each other, the shared logic belongs in `escrow/`.
+### Listings
+- `GET  /api/listings` **(public)** → `?search=&category=&page=&limit=` — only `ACTIVE`,
+  **never** returns `deliveryInfo`
+- `GET  /api/listings/:id` **(public)** — no `deliveryInfo`
+- `GET  /api/listings/mine`
+- `POST /api/listings` → `{ title, description, category?, priceUsd, deliveryInfo? }`
+- `PATCH /api/listings/:id` (owner only)
+- `DELETE /api/listings/:id` (owner only → status `DELETED`)
+
+### Orders
+- `POST /api/orders` → `{ listingId }`
+  - reject if buyer === seller, or listing not `ACTIVE`
+  - compute fee, create order `PENDING_PAYMENT`, call OxaPay invoice, store
+    `oxapayTrackId` + `paymentUrl`, return `{ order, paymentUrl }`
+- `GET  /api/orders/purchases`
+- `GET  /api/orders/sales`
+- `GET  /api/orders/:id` — buyer or seller only. `deliveryInfo` included **only** for the
+  buyer and **only** when status is `PAID` / `DISPUTED` / `REFUNDED`.
+
+### Wallet
+- `GET  /api/wallet/balance` → `{ available, vesting, disputed, withdrawing, withdrawn, nextVestingAt }`
+- `GET  /api/wallet/orders` → per-order breakdown for the FE table
+- `POST /api/wallet/withdraw` → `{ address, network, currency? }` — withdraws the `available`
+  bucket only (vested, undisputed, unlinked orders). Orders still vesting are untouched.
+- `GET  /api/wallet/withdrawals`
+
+### Disputes
+- `POST /api/orders/:id/dispute` → `{ reason }` (buyer only) → creates dispute + Telegram group,
+  responds with `telegramInviteLink` (may be `null` if Telegram failed)
+- `GET  /api/disputes/mine`
+- `GET  /api/disputes/:id` (buyer, seller or admin) — includes `telegramInviteLink` for all three,
+  so the FE can render a "Join dispute chat" button on the order view for **both** parties
+
+### Admin (`AdminGuard`)
+- `GET  /api/admin/disputes?status=OPEN`
+- `POST /api/admin/disputes/:id/resolve` → `{ winner: "BUYER" | "SELLER", note? }`
+- `POST /api/admin/disputes/:id/telegram-retry` — re-run group creation if Telegram failed
+- `GET  /api/admin/orders`
+- `GET  /api/admin/withdrawals`
+- `GET  /api/admin/stats` → counts + volume (nice for the demo)
+
+### Webhooks (public, raw body)
+- `POST /api/webhooks/oxapay/payment`
+- `POST /api/webhooks/oxapay/payout`
+
+### Misc
+- `GET /api/health` **(public)**
 
 ---
 
-## 8. Auth (Clerk)
+## 7. Clerk auth
 
-- Frontend gets a session JWT from Clerk and sends `Authorization: Bearer <token>`.
-- `ClerkAuthGuard` is registered globally via `APP_GUARD`. It verifies the token with `verifyToken` from `@clerk/backend` using `CLERK_SECRET_KEY`.
-- On success, look up `User` by `clerkId`. **JIT-provision**: if not found, create the `User` and its `Wallet` in one transaction, pulling email/name/avatar from the Clerk claims.
-- Attach the local `User` (not the Clerk object) to `req.user`. `@CurrentUser()` returns it.
-- Mark public routes with `@Public()`: `GET /health`, `POST /webhooks/oxapay`, `GET /listings`, `GET /listings/:id`.
-- **Roles live in our DB, not in Clerk.** Seed admins from `ADMIN_EMAILS` (comma-separated) in `prisma/seed.ts`. `RolesGuard` reads `user.role`.
-- The admin panel is a route group in the same React app; there is no separate admin auth. `@Roles(Role.ADMIN)` is the only gate.
+Only the backend verification matters here — Google login happens on the frontend.
+
+```ts
+import { verifyToken } from '@clerk/backend';
+
+const payload = await verifyToken(token, { secretKey: process.env.CLERK_SECRET_KEY });
+// payload.sub -> clerkUserId; email may be in payload.email or a custom claim
+```
+
+`ClerkAuthGuard`:
+1. Read `Authorization: Bearer <token>`. Missing → 401.
+2. `verifyToken`. Invalid → 401.
+3. `prisma.user.upsert({ where: { clerkUserId: payload.sub }, ... })` — **JIT provisioning**,
+   no webhook, no sync job. If the email isn't in the token, fall back to
+   `clerkClient.users.getUser(sub)` once on create only.
+4. Attach to `req.user`.
+
+Admin: seeded manually. `ADMIN_EMAILS` env (comma-separated) — on upsert, if the email is in that
+list, force `role = ADMIN`. Simplest possible admin bootstrap.
+
+**Dev bypass:** when `NODE_ENV !== 'production'` and `DEV_AUTH_BYPASS=true`, the guard accepts a
+`x-dev-user-email: <email>` header instead of a Bearer token and upserts that user with a synthetic
+`clerkUserId` of `dev_<email>`. Every bypassed request logs a loud warning. Never enable it in prod.
 
 ---
 
-## 9. OxaPay integration
+## 8. OxaPay integration
 
-> OxaPay's API has both a legacy and a v1 surface. Use **v1**. If a request 404s or the response shape differs from what's below, check https://docs.oxapay.com/api-reference before improvising.
+Everything OxaPay-specific lives in **`payments/oxapay.service.ts`** so API changes are a one-file fix.
+Docs: https://docs.oxapay.com — verify field names against the live docs if a call 400s.
 
-### Creating an invoice
-
-`POST https://app-api.oxapay.com/v1/payment/invoice`
-
-Headers: `merchant_api_key: <OXAPAY_MERCHANT_KEY>`, `Content-Type: application/json`
+### Create invoice
+`POST https://api.oxapay.com/v1/payment/invoice`
+Header: `merchant_api_key: <OXAPAY_MERCHANT_API_KEY>`
 
 ```json
 {
   "amount": 12.5,
   "currency": "USD",
-  "lifetime": 30,
+  "lifetime": 60,
   "fee_paid_by_payer": 1,
-  "order_id": "<our Order.id>",
-  "callback_url": "https://<PUBLIC_URL>/webhooks/oxapay",
-  "return_url": "https://<FRONTEND_URL>/orders/<orderId>",
-  "description": "Seat in <listing.title>",
-  "sandbox": true
+  "order_id": "<our order id>",
+  "description": "<listing title>",
+  "callback_url": "https://<PUBLIC_API_URL>/api/webhooks/oxapay/payment",
+  "return_url": "https://<FRONTEND_URL>/orders/<order id>",
+  "sandbox": false
 }
 ```
+Response `data`: `{ track_id, payment_url, expired_at }` → store `track_id` and `payment_url`.
 
-Response gives a `track_id` and a `payment_url`. Store them on `Payment.providerTrackId` / `Payment.payLink` and return `payLink` to the frontend.
+### Payout (withdrawal)
+`POST https://api.oxapay.com/v1/payout`
+Header: `payout_api_key: <OXAPAY_PAYOUT_API_KEY>`
 
-- `amount` is in **dollars** (a float), so convert: `amountCents / 100`. This is the only place dollars are allowed.
-- `fee_paid_by_payer: 1` so OxaPay's network fee doesn't eat into our 4%.
-- Always send `sandbox: true` in dev — driven by `OXAPAY_SANDBOX` in env.
-
-### Webhook
-
-`POST /webhooks/oxapay`, `application/json`.
-
-1. **Raw body is required.** In `main.ts`, enable `rawBody: true` on the Nest app and read `req.rawBody` in the controller. Verifying HMAC against a re-serialized body will fail.
-2. Verify: `crypto.createHmac('sha512', OXAPAY_MERCHANT_KEY).update(rawBody).digest('hex')` must equal the `HMAC` request header. Compare with `crypto.timingSafeEqual`. On mismatch, return **400** and do not process.
-3. Insert a `WebhookEvent` on `(provider, externalId, status)`. On unique-constraint conflict, return `200 "ok"` and stop — already handled.
-4. Dispatch on status:
-   - `waiting` → `Payment.status = WAITING`
-   - `paying` / `confirming` → `CONFIRMING`. **This is not payment.** OxaPay sends `paying` first and `paid` later; only act on `paid`.
-   - `paid` → verify the amount covers `amountRequestedCents`, then run flow 6.1.
-   - `underpaid` → `UNDERPAID`, leave the order in `PENDING_PAYMENT`, surface it to the buyer. Don't auto-resolve.
-   - `expired` / `failed` → `EXPIRED` / `FAILED`, free the seat.
-5. **Always respond `200` with the body `ok`.** OxaPay treats anything else as a failure and retries up to 5 times.
-6. If our own processing throws, still return `200`, but record the error on `WebhookEvent.error` and log it — a retry storm during the demo is worse than a missed event we can replay.
-
-### Local development
-
-OxaPay must be able to reach the callback URL. Run `ngrok http 3000` (or a Cloudflare tunnel) and put the public URL in `PUBLIC_URL`. There is also `POST /admin/payments/:id/simulate-paid`, available only when `NODE_ENV !== 'production'` — **build this early**, it's what makes the demo survive a bad conference wifi.
-
----
-
-## 10. Cron jobs
-
-All in `jobs.service.ts` with `@Cron`. Every handler must be re-entrant and idempotent — assume it may overlap with itself.
-
-| Job | Schedule | What it does |
-|---|---|---|
-| `expireStaleOrders` | every minute | `PENDING_PAYMENT` orders past `reservationExpiresAt` → `EXPIRED`, freeing the seat. Skip any with a payment in `CONFIRMING`. |
-| `expireUnfilledListings` | every 5 min | `OPEN` listings past `fillDeadline` with `paidSeats < totalSeats` → run flow 6.4. |
-| `releaseVestedEscrows` | every 5 min | `VESTING` escrows with `vestingEndsAt <= now` → run flow 6.3. Never touch `FROZEN`. |
-| `autoActivateListings` | every 5 min | Safety net: `FILLED` listings whose seller hasn't clicked deliver within `AUTO_ACTIVATE_HOURS` → activate anyway (flow 6.2), so a passive seller can't stall the vesting clock forever. |
-
-For the demo, `VESTING_SPEEDUP_FACTOR` divides `durationDays` when computing `vestingEndsAt` — set it to `2880` and a 30-day plan vests in 15 minutes.
-
----
-
-## 11. API surface
-
-`GET`/`POST` under `/api/v1`. All authenticated unless marked **public**.
-
-### Health & profile
-```
-GET    /health                              public
-GET    /me
-PATCH  /me                                  { displayName?, avatarUrl? }
-```
-
-### Listings
-```
-POST   /listings                            create (seller)
-GET    /listings                            public; ?type&serviceSlug&status&q&page&limit
-GET    /listings/:id                        public; includes seatsTaken/seatsLeft
-GET    /listings/mine                       as seller
-PATCH  /listings/:id                        seller only, only while OPEN with zero paid orders
-POST   /listings/:id/cancel                 seller only; refunds every HELD escrow
-POST   /listings/:id/activate               seller only; FILLED -> ACTIVE, starts vesting
-```
-
-`POST /listings` body:
-```ts
+```json
 {
-  title: string;
-  description?: string;
-  serviceName: string;
-  type: 'GROUP' | 'SINGLE';
-  totalSeats: number;        // must be 1 when type = SINGLE
-  pricePerSeatCents: number; // > 0
-  durationDays: number;      // 1..365
-  fillDeadline: string;      // ISO, must be in the future
+  "address": "<user wallet>",
+  "currency": "USDT",
+  "amount": 12.5,
+  "network": "TRC20",
+  "callback_url": "https://<PUBLIC_API_URL>/api/webhooks/oxapay/payout",
+  "description": "withdrawal <withdrawal id>"
 }
 ```
+Response `data`: `{ track_id, status }`.
 
-### Orders
-```
-POST   /listings/:id/orders                 claim a seat -> { order, payLink }
-GET    /orders/mine                         as buyer
-GET    /orders/incoming                     as seller, across all their listings
-GET    /orders/:id                          buyer, seller, or admin
-POST   /orders/:id/cancel                   buyer, only while PENDING_PAYMENT
-POST   /orders/:id/deliver                  seller; { deliveryNote }
-POST   /orders/:id/confirm                  buyer confirms receipt (informational)
-```
+### Webhooks
+- OxaPay sends `HMAC` header = `hmac_sha512(rawBody, key)`.
+  Key is the **merchant** key for `type: "payment"`, the **payout** key for `type: "payout"`.
+- Verify with `crypto.timingSafeEqual`. Mismatch → `401` and log the body.
+- **Raw body is required.** In `main.ts`:
+  ```ts
+  const app = await NestFactory.create(AppModule, { rawBody: true });
+  ```
+  and read `req.rawBody` in the controller (`@Req() req: RawBodyRequest<Request>`).
+- Body statuses are strings — compare **lowercased**: `waiting`, `confirming`, `paid`,
+  `expired`, `failed`. Payout: `confirming`, `complete`/`completed`, `failed`, `rejected`.
+- **Idempotency:** first insert into `WebhookEvent`; if the unique constraint throws (P2002),
+  return `200 OK` and do nothing else.
+- Always return `200` with body `OK` once the signature is valid, even for statuses we ignore —
+  otherwise OxaPay retries forever.
 
-### Payments
+Payment webhook handler:
 ```
-POST   /webhooks/oxapay                     public, HMAC-verified, raw body
-GET    /orders/:id/payment                  poll status from the frontend
-POST   /dev/payments/:id/simulate-paid      non-production only
-```
-
-### Wallet
-```
-GET    /wallet                              { availableBalanceCents, lockedBalanceCents, vestingSchedule[] }
-GET    /wallet/ledger                       paginated
-POST   /wallet/payouts                      { amountCents, address, network }
-GET    /wallet/payouts
-```
-
-### Disputes
-```
-POST   /orders/:id/disputes                 { reason, description }
-GET    /disputes/mine                       opened by or against me
-GET    /disputes/:id
-POST   /disputes/:id/messages               { body, attachments? }
-POST   /disputes/:id/cancel                 opener only, while OPEN
+find order by oxapayTrackId (fallback: order_id)
+if status == paid && order.status == PENDING_PAYMENT:
+    status = PAID
+    paidAt = now
+    vestedAt = now + VESTING_DAYS days
+if status in (expired, failed) && order.status == PENDING_PAYMENT:
+    status = EXPIRED
 ```
 
-Rules: a dispute can only be opened on an order in `PAID` or `ACTIVE` state, and only before `escrow.vestingEndsAt + DISPUTE_GRACE_HOURS`. Opening one immediately sets `escrow.status = FROZEN` and `order.status = DISPUTED`. Only one open dispute per order.
-
-### Admin (`@Roles(ADMIN)`)
-```
-GET    /admin/stats                         GMV, fees collected, open disputes, pending payouts
-GET    /admin/disputes                      ?status&page
-POST   /admin/disputes/:id/claim            -> UNDER_REVIEW, assigns resolvedById
-POST   /admin/disputes/:id/resolve          { outcome, refundCents?, resolutionNote }
-GET    /admin/listings                      all statuses
-POST   /admin/listings/:id/cancel
-GET    /admin/users                         ?q
-POST   /admin/users/:id/ban
-GET    /admin/payouts                       ?status
-POST   /admin/payouts/:id/approve
-POST   /admin/payouts/:id/reject            { adminNote } — reverses the debit
-POST   /admin/payouts/:id/mark-sent         { txHash }
-```
-
-### Response conventions
-
-- Success: the resource itself, or `{ data, meta: { page, limit, total } }` for lists.
-- Errors: Nest's standard shape via `AllExceptionsFilter` — `{ statusCode, message, error, code? }`. Use a machine-readable `code` for anything the frontend branches on: `SEATS_SOLD_OUT`, `LISTING_NOT_OPEN`, `DUPLICATE_ORDER`, `INSUFFICIENT_BALANCE`, `DISPUTE_WINDOW_CLOSED`.
-- Never leak another user's email or Clerk ID. Public listing responses expose only `{ id, displayName, avatarUrl }` for the seller.
+Local testing: OxaPay will not call localhost — use `ngrok http 3000` and put the ngrok URL in
+`PUBLIC_API_URL`. Use `"sandbox": true` while developing.
 
 ---
 
-## 12. Environment variables
+## 9. Telegram disputes
 
-```bash
-# .env.example
-NODE_ENV=development
+**A real, separate group is created per dispute.** The plain Bot API cannot create groups, so this
+goes through **MTProto with a user account** (the platform's "support" account) using
+[`telegram` (GramJS)](https://www.npmjs.com/package/telegram).
+
+Setup (done once, by hand, outside the app):
+1. Get `api_id` / `api_hash` from https://my.telegram.org.
+2. Log the support account in once with a throwaway script and print the **StringSession**.
+   Put it in `TELEGRAM_SESSION`. Never log in during a request.
+3. Create the bot too (`TELEGRAM_BOT_TOKEN`) — the bot is added to each group so the backend can
+   post status updates via the simple Bot API instead of MTProto.
+
+On dispute creation, `TelegramService.createDisputeGroup(dispute)`:
+```
+client.invoke(new Api.messages.CreateChat({
+  users: [...TELEGRAM_ADMIN_USERNAMES, TELEGRAM_BOT_USERNAME],   // admins + bot ONLY
+  title: `Dispute #${shortId} — ${listingTitle}`,
+}))
+→ get chatId
+→ EditChatAdmin for the bot and each admin username
+→ ExportChatInvite → invite link
+→ send the opening message: order id, amount, buyer, seller, reason
+```
+Store `telegramChatId` + `telegramInviteLink` on the `Dispute`.
+
+**Buyer and seller are never added programmatically.** We do not touch their accounts, do not need
+their `telegramUsername`, and never handle `missing_invitees`. They receive the **invite link** and
+join themselves. The FE shows the link on the order/dispute view for both parties.
+
+This means the group always contains the admins + the bot from the moment it is created, so an
+admin can read and moderate it even before either party joins.
+
+Gotchas that will bite during the demo:
+- The support account must have all `TELEGRAM_ADMIN_USERNAMES` reachable (privacy settings / prior
+  contact). Since it's your own team's accounts, add them as contacts once and forget it.
+  If one of them can't be added, log it and continue — the bot is enough to run the group.
+- `ExportChatInvite` must succeed, because the link is the **only** way buyer and seller get in.
+  If it throws, mark the dispute's Telegram fields null and rely on the retry endpoint.
+- Basic groups get auto-upgraded to supergroups; the chat id changes. Save whatever id the API
+  returns and don't rely on it staying stable — the invite link is the durable handle.
+- Rate limits: MTProto will throw `FLOOD_WAIT_X`. Catch it, log it, and still create the dispute.
+
+**Telegram must never block the dispute.** Wrap the entire call in try/catch; on failure or when
+`TELEGRAM_SESSION` is unset, log a warning, store `null` for the chat fields and return the dispute
+as created. Add `POST /api/admin/disputes/:id/telegram-retry` so you can re-run the group creation
+manually if it failed.
+
+When the admin resolves, post the outcome into the group via the Bot API (`sendMessage`), then
+leave the group open — no need to delete anything.
+
+---
+
+## 10. Environment
+
+`.env` (+ commit a `.env.example`):
+
+```
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/marketplace
 PORT=3000
-PUBLIC_URL=https://your-tunnel.ngrok.app     # OxaPay must reach this
-FRONTEND_URL=http://localhost:5173
-CORS_ORIGINS=http://localhost:5173
-
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/seatshare
+PUBLIC_API_URL=https://xxxx.ngrok-free.app
+FRONTEND_URL=http://localhost:3001
 
 CLERK_SECRET_KEY=sk_test_xxx
 CLERK_PUBLISHABLE_KEY=pk_test_xxx
-ADMIN_EMAILS=you@example.com,teammate@example.com
+ADMIN_EMAILS=me@example.com
 
-OXAPAY_MERCHANT_KEY=xxxxxx-xxxxxx-xxxxxx-xxxxxx
+OXAPAY_MERCHANT_API_KEY=xxx
+OXAPAY_PAYOUT_API_KEY=xxx
 OXAPAY_SANDBOX=true
 
-PLATFORM_FEE_BPS=400
-ORDER_RESERVATION_MINUTES=30
-AUTO_ACTIVATE_HOURS=24
-DISPUTE_GRACE_HOURS=72
-VESTING_SPEEDUP_FACTOR=1                     # set to 2880 for the demo
+TELEGRAM_API_ID=1234567                  # my.telegram.org, for GramJS
+TELEGRAM_API_HASH=xxx
+TELEGRAM_SESSION=<StringSession>         # support account, generated once offline
+TELEGRAM_BOT_TOKEN=xxx                   # bot that posts updates into the group
+TELEGRAM_BOT_USERNAME=my_escrow_bot
+TELEGRAM_ADMIN_USERNAMES=admin1,admin2   # added + promoted to admin in every dispute group
+
+VESTING_DAYS=30
+DISPUTE_WINDOW_DAYS=30
+PLATFORM_FEE_PERCENT=5
+MIN_WITHDRAWAL_USD=1
 ```
 
-Validate all of these at boot in `env.validation.ts`. A missing `OXAPAY_MERCHANT_KEY` should crash on startup, not at the first payment.
+`env.validation.ts` fails fast on missing `DATABASE_URL`, `CLERK_SECRET_KEY`,
+`OXAPAY_MERCHANT_API_KEY`. Telegram vars are optional.
 
 ---
 
-## 13. Conventions
-
-- **TypeScript strict mode on.** No `any` in service signatures; `unknown` + a narrowing guard for external payloads.
-- **DTOs for every request body**, validated by a global `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })`.
-- **Services hold the logic, controllers stay thin** — parse, delegate, return. No Prisma calls in controllers.
-- **Prisma transactions**: use the interactive form `prisma.$transaction(async (tx) => { ... })` and pass `tx` down. Every money-touching service method accepts an optional `tx` parameter so it can compose.
-- **Naming**: files `kebab-case.ts`, classes `PascalCase`, DB tables snake_case plural via `@@map`.
-- **Dates**: always store and return UTC ISO strings. Never a bare date string.
-- **Logging**: use Nest's `Logger` with the class name as context. Every state transition on an order, escrow, or dispute gets an `INFO` log with the ids and the before/after status. This is what you'll be reading at 3am.
-- **Comments**: only where the *why* is non-obvious — mostly around the money invariants. Don't narrate the code.
-
----
-
-## 14. Commands
+## 11. Commands
 
 ```bash
-npm install
-docker compose up -d                 # postgres on :5432
-npx prisma migrate dev --name init
+npm run start:dev              # nest start --watch
+npx prisma migrate dev --name x
+npx prisma studio
 npx prisma db seed
-npm run start:dev                    # :3000, Swagger at /docs
-
-npx prisma studio                    # inspect the DB during the demo
-npx prisma migrate reset             # nuke and reseed
-
-npm run lint
-npm run build
+docker compose up -d           # postgres only
+ngrok http 3000                # for OxaPay callbacks
 ```
 
----
-
-## 15. Build order
-
-Work in this sequence. Each step should leave the app runnable.
-
-1. Nest scaffold, Prisma, Postgres in Docker, `/health` responding.
-2. Full `schema.prisma` + initial migration + seed with two users and an admin.
-3. Clerk guard, JIT user provisioning, `GET /me`.
-4. Listings CRUD + public browse. **Demoable milestone.**
-5. Orders with seat reservation and row locking, no payments yet — `simulate-paid` endpoint stands in.
-6. `LedgerService` + `EscrowService`: flows 6.1 → 6.4 driven by the simulate endpoint. **This is the core of the project — get it right before touching OxaPay.**
-7. Cron jobs with `VESTING_SPEEDUP_FACTOR`.
-8. Real OxaPay invoice creation + webhook. Keep `simulate-paid` working as a fallback.
-9. Wallet + payout requests.
-10. Disputes + admin resolution.
-11. Admin stats and queues.
-
-If time runs out, cut in reverse order — items 1–7 alone are a complete, demoable product.
+`docker-compose.yml`: just `postgres:16-alpine`, port 5432, volume. Nothing else.
 
 ---
 
-## 16. Demo script
+## 12. Demo runbook
 
-The story to tell on stage. Make sure this path never breaks.
+### Reset to the demo dataset
 
-1. Seller signs in with Google, posts a YouTube Premium Family listing: 4 seats, $3 each, 30 days, deadline in 24h.
-2. Three buyers sign in, claim seats, pay via the OxaPay sandbox. The listing shows 3/4 sold.
-3. The fourth buyer pays → listing flips to `FILLED` → seller clicks deliver → `ACTIVE`. The seller's wallet shows **$11.52 locked** ($12 gross − 4% = $0.48 fee) and $0 available.
-4. `VESTING_SPEEDUP_FACTOR` makes the 30 days elapse in ~15 minutes; the balance moves from locked to available live on screen.
-5. Meanwhile, a second listing's deadline passes with only 2 of 5 seats sold → both buyers see a **full refund with no fee deducted** land in their wallets.
-6. One buyer opens a dispute claiming the seat was revoked. The seller's escrow freezes mid-vesting. The admin opens the panel, reads the thread, and rules for the buyer — money moves back, and the platform gives up its fee too.
-7. Close on the admin stats page: GMV, total fees collected, disputes resolved.
+```bash
+docker compose up -d
+npx prisma migrate deploy      # or: npx prisma migrate dev
+npx prisma db seed             # wipes everything, reseeds, prints the balance table
+npm run start:dev
+```
+
+`prisma db seed` is destructive and idempotent on purpose — run it as often as you like,
+you always get the same data. It prints a table of every user's balance buckets plus a
+cheat sheet of which account to log in as. Read that table before you present.
+
+Seeded accounts (`x-dev-user-email` values):
+
+| Account                     | Why you'd use it                                        |
+| --------------------------- | ------------------------------------------------------- |
+| `elena.petrova@example.com` | Seller with money in **every** bucket — the main account |
+| `marcus.reid@example.com`   | Seller with one clean payout ready to withdraw           |
+| `tom.becker@example.com`    | Buyer with two unpaid invoices                           |
+| `priya.nair@example.com`    | Empty wallet — good for showing a balance fill up        |
+| `ADMIN_EMAILS[0]`           | The admin who resolves `dsp_open_1`                      |
+
+### The three switches
+
+| Env                    | Demo value | What it does                                                                                                                                              |
+| ---------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VESTING_DAYS`         | `0`        | New payments vest instantly (`vestedAt = paidAt`), so a purchase is withdrawable the second the webhook lands. **Only affects orders paid from now on** — seeded `vestedAt` values are fixed, so the vesting spread stays visible in the wallet table. |
+| `OXAPAY_MOCK`          | `true`     | No live OxaPay calls. Invoices get a fake `track_id` and a `paymentUrl` pointing at the built-in mock checkout; payouts get a fake track id. Also mounts `/api/dev/*`. |
+| `DEV_AUTH_BYPASS`      | `true`     | Accept `x-dev-user-email: <email>` instead of a Clerk bearer token. Also mounts `/api/dev/*`. Ignored when `NODE_ENV=production`.                          |
+
+Both dev switches are inert in production: `DevModule` and the bypass check
+`NODE_ENV !== 'production'` before doing anything.
+
+The mock checkout at `GET /api/dev/mock-pay/:orderId` is a real page with two buttons. It
+builds an OxaPay-shaped callback, signs it with the merchant key and POSTs it to the real
+webhook — so the HMAC check, the idempotency guard and the vesting maths are all genuinely
+exercised, not stubbed. `POST /api/dev/mock-payout/:withdrawalId` does the same for payouts.
+
+Live-payment demo instead of mock: set `OXAPAY_MOCK=false`, `OXAPAY_SANDBOX=true`, run
+`ngrok http 3000` and put the ngrok URL in `PUBLIC_API_URL` — OxaPay cannot call localhost.
+
+### Two-minute happy path
+
+Run with `VESTING_DAYS=0 OXAPAY_MOCK=true DEV_AUTH_BYPASS=true`. Everything below is
+clickable from `/docs` — hit **Authorize**, put the e-mail in the `dev-bypass` box.
+
+1. **Browse** — `GET /api/listings` (no auth at all). 8 listings. Point out that
+   `deliveryInfo` is not in the payload.
+2. **Buy** — as `tom.becker@example.com`: `POST /api/orders { "listingId": "lst_adobe" }`.
+   Order is `PENDING_PAYMENT`, response carries `paymentUrl`.
+3. **Simulate payment** — open that `paymentUrl` and click *Simulate payment*. The webhook
+   flips the order to `PAID` and sets `paidAt` / `vestedAt` (identical, because
+   `VESTING_DAYS=0`).
+4. **Buyer gets the goods** — as Tom: `GET /api/orders/{id}` now includes `deliveryInfo`.
+   It did not a moment ago, and it never does for the seller.
+5. **Seller balance** — as `priya.nair@example.com` (she sells `lst_adobe`):
+   `GET /api/wallet/balance` → the money is in `available` immediately.
+6. **Withdraw** — as Priya: `POST /api/wallet/withdraw { "address": "...", "network": "TRC20" }`.
+   No amount parameter: it pays out the whole `available` bucket. Balance moves to
+   `withdrawing`. Then `POST /api/dev/mock-payout/{id} { "status": "completed" }` moves it
+   to `withdrawn`.
+7. **Vesting is per order** — as `elena.petrova@example.com`: `GET /api/wallet/orders`.
+   Some orders are `available`, some still `vesting` with different dates, one is
+   `disputed` and one is already `withdrawn`. This is the escrow story in one table.
+8. **Dispute** — the seeded `dsp_open_1` is already `OPEN` on `ord_disputed_1`, and Elena's
+   `$16.62` sits in `disputed`, frozen even though it will vest. (To open a fresh one live:
+   as the buyer, `POST /api/orders/{id}/dispute { "reason": "..." }` — it returns a Telegram
+   invite link, or `null` if Telegram is not configured, which never blocks the dispute.)
+9. **Admin resolves** — as the admin: `GET /api/admin/disputes?status=OPEN`, then
+   `POST /api/admin/disputes/dsp_open_1/resolve { "winner": "BUYER" }`. Refresh both wallets:
+   the money left Elena's `disputed` bucket and appeared in Priya's `available` one,
+   withdrawable right away. No OxaPay refund call — the buyer withdraws like a seller.
+10. **Numbers** — `GET /api/admin/stats` for the closing slide.
+
+If Telegram is configured, step 8's group is created for the admins + bot, and step 9 posts
+the outcome into it. If it isn't, everything above still works; the invite link is `null`.
+`POST /api/admin/disputes/{id}/telegram-retry` creates the group afterwards.
+
+---
+
+## 13. Build order (follow this)
+
+1. Scaffold: Nest app, Prisma, docker-compose, config + env validation, `/api/health`, Swagger.
+2. Full `schema.prisma` + first migration + seed (admin + 3 listings).
+3. `ClerkAuthGuard` + `@Public()` + `@CurrentUser()` + `GET/PATCH /api/me`.
+4. Listings CRUD.
+5. `OxaPayService.createInvoice` + `POST /api/orders` + orders read endpoints.
+6. Payment webhook (raw body, HMAC, idempotency) → sets `PAID` + `vestedAt`. **Test with ngrok now.**
+7. `WalletService.getWithdrawableOrders` + `GET /api/wallet/balance`.
+8. `POST /api/wallet/withdraw` + `OxaPayService.createPayout` + payout webhook.
+9. Disputes: create + Telegram topic + block withdrawals.
+10. Admin: list disputes + resolve (BUYER / SELLER) + stats.
+11. Demo polish: `VESTING_DAYS=0` path, better error messages, Swagger tags.
+
+---
+
+## 14. Conventions
+
+- Errors: throw Nest exceptions (`BadRequestException`, `ForbiddenException`, `NotFoundException`)
+  with short human messages the FE can display directly.
+- Never leak `deliveryInfo` of a listing to anyone but the buyer of a paid order.
+- Every money mutation goes through a Prisma `$transaction`.
+- Return `Decimal` as **strings** in JSON (`amountUsd: "12.50"`) — configure a serializer or
+  `.toFixed(2)` in the mapper. Never send floats to the FE.
+- All timestamps are ISO-8601 UTC.
+- Log every OxaPay request/response and every webhook body with `Logger` — during a hackathon demo
+  this is the only debugging you'll get.

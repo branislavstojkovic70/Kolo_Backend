@@ -1,0 +1,175 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum ListingStatus {
+  ACTIVE
+  PAUSED
+  DELETED
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  DISPUTED
+  REFUNDED
+  EXPIRED
+}
+
+enum DisputeStatus {
+  OPEN
+  RESOLVED_BUYER
+  RESOLVED_SELLER
+}
+
+enum WithdrawalStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id               String  @id @default(cuid())
+  clerkUserId      String  @unique // subject from the Clerk JWT
+  email            String  @unique
+  username         String? // display name
+  imageUrl         String?
+  telegramUsername String? // informational only — shown in the dispute group's
+  // opening message. NOT used to add anyone to a group.
+  role             Role    @default(USER)
+
+  listings         Listing[]
+  purchases        Order[]      @relation("buyer")
+  sales            Order[]      @relation("seller")
+  beneficiaryOf    Order[]      @relation("beneficiary")
+  withdrawals      Withdrawal[]
+  openedDisputes   Dispute[]    @relation("openedBy")
+  resolvedDisputes Dispute[]    @relation("resolvedBy")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Listing {
+  id           String        @id @default(cuid())
+  sellerId     String
+  seller       User          @relation(fields: [sellerId], references: [id])
+  title        String
+  description  String
+  category     String? // free text, no separate table
+  priceUsd     Decimal       @db.Decimal(18, 2)
+  // shown to the buyer only after payment (credentials, instructions, contact)
+  deliveryInfo String?
+  status       ListingStatus @default(ACTIVE)
+  orders       Order[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([sellerId])
+}
+
+model Order {
+  id        String  @id @default(cuid())
+  listingId String
+  listing   Listing @relation(fields: [listingId], references: [id])
+  buyerId   String
+  buyer     User    @relation("buyer", fields: [buyerId], references: [id])
+  sellerId  String
+  seller    User    @relation("seller", fields: [sellerId], references: [id])
+
+  // snapshot at purchase time — listing may change later
+  titleSnapshot   String
+  amountUsd       Decimal @db.Decimal(18, 2) // what the buyer pays
+  feeUsd          Decimal @db.Decimal(18, 2) // platform fee
+  sellerAmountUsd Decimal @db.Decimal(18, 2) // amount - fee = escrowed amount
+
+  status OrderStatus @default(PENDING_PAYMENT)
+
+  // who is allowed to withdraw sellerAmountUsd (seller by default, buyer if he wins a dispute)
+  beneficiaryId String
+  beneficiary   User   @relation("beneficiary", fields: [beneficiaryId], references: [id])
+
+  oxapayTrackId String?   @unique
+  paymentUrl    String?
+  paidAt        DateTime?
+  vestedAt      DateTime? // paidAt + VESTING_DAYS
+
+  withdrawalId String?
+  withdrawal   Withdrawal? @relation(fields: [withdrawalId], references: [id])
+
+  dispute Dispute?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([buyerId, createdAt])
+  @@index([sellerId, createdAt])
+  @@index([beneficiaryId, status])
+}
+
+model Dispute {
+  id         String        @id @default(cuid())
+  orderId    String        @unique
+  order      Order         @relation(fields: [orderId], references: [id])
+  openedById String
+  openedBy   User          @relation("openedBy", fields: [openedById], references: [id])
+  reason     String
+  status     DisputeStatus @default(OPEN)
+
+  telegramChatId     String? // group id returned by MTProto (store as string, it can change)
+  telegramInviteLink String? // durable handle, shown to buyer & seller in the UI
+
+  resolvedById   String?
+  resolvedBy     User?     @relation("resolvedBy", fields: [resolvedById], references: [id])
+  resolutionNote String?
+  resolvedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Withdrawal {
+  id            String           @id @default(cuid())
+  userId        String
+  user          User             @relation(fields: [userId], references: [id])
+  amountUsd     Decimal          @db.Decimal(18, 2)
+  currency      String           @default("USDT")
+  network       String // TRC20 / BEP20 / TON ...
+  address       String
+  status        WithdrawalStatus @default(PENDING)
+  oxapayTrackId String?          @unique
+  error         String?
+  completedAt   DateTime?
+  orders        Order[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// idempotency guard for OxaPay callbacks
+model WebhookEvent {
+  id       String @id @default(cuid())
+  provider String @default("oxapay")
+  type     String // payment | payout
+  trackId  String
+  status   String
+  payload  Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([provider, type, trackId, status])
+}
