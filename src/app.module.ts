@@ -6,6 +6,7 @@ import { validateEnv } from './config/env.validation';
 import { ClerkAuthGuard } from './common/guards/clerk-auth.guard';
 import { PrismaModule } from './prisma/prisma.module';
 import { HealthModule } from './modules/health/health.module';
+import { PlatformConfigModule } from './modules/config/config.module';
 import { UsersModule } from './modules/users/users.module';
 import { ListingsModule } from './modules/listings/listings.module';
 import { OrdersModule } from './modules/orders/orders.module';
@@ -25,6 +26,7 @@ import { DevModule } from './modules/dev/dev.module';
     }),
     PrismaModule,
     HealthModule,
+    PlatformConfigModule,
     UsersModule,
     ListingsModule,
     OrdersModule,

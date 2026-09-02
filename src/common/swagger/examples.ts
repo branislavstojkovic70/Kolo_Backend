@@ -297,3 +297,12 @@ export const ADMIN_STATS = {
 };
 
 export const HEALTH = { status: 'ok', db: 'up' };
+
+export const PLATFORM_CONFIG = {
+  feePercent: 4,
+  vestingDays: 30,
+  disputeWindowDays: 30,
+  minWithdrawalUsd: '1.00',
+  payoutCurrencies: ['USDT', 'USDC', 'TRX', 'TON', 'BTC', 'ETH'],
+  payoutNetworks: ['TRC20', 'BEP20', 'ERC20', 'TON', 'POLYGON'],
+};

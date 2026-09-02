@@ -387,6 +387,10 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
 
 ### Misc
 - `GET /api/health` **(public)**
+- `GET /api/config` **(public)** → `{ feePercent, vestingDays, disputeWindowDays, minWithdrawalUsd,
+  payoutCurrencies[], payoutNetworks[] }`
+  - Every platform rule the UI displays comes from here. The frontend is not allowed to keep its
+    own copy of the fee or the vesting length — a changed env must change the UI, not lie in it.
 
 ---
 
