@@ -51,19 +51,37 @@ export class ListingsController {
   }
 
   // must stay above :id so "mine" isn't swallowed as an id
+  @Public()
+  @Get('stats')
+  @ApiOperation({
+    summary: 'Marketplace headline numbers (public)',
+    description:
+      'Counted over `ACTIVE` listings in the database, not over one page of results — ' +
+      'the FE must not average a page and call it a catalogue median.',
+  })
+  @ApiOkResponse({
+    description: 'Catalogue stats',
+    schema: { example: EX.LISTING_STATS },
+  })
+  stats() {
+    return this.listings.stats();
+  }
+
   @Get('mine')
   @ApiAuth()
   @ApiOperation({
     summary: 'My listings',
     description:
-      'Everything I sell except soft-deleted rows. Includes `PAUSED` listings.',
+      'Everything I sell except soft-deleted rows, paginated. Includes `PAUSED` ' +
+      'listings, and takes the same `search` / `category` / price / `sort` filters ' +
+      'as the public feed.',
   })
   @ApiOkResponse({
     description: 'My listings',
-    schema: { example: [EX.LISTING] },
+    schema: { example: EX.LISTING_PAGE },
   })
-  findMine(@CurrentUser() user: User) {
-    return this.listings.findMine(user.id);
+  findMine(@CurrentUser() user: User, @Query() q: QueryListingsDto) {
+    return this.listings.findMine(user.id, q);
   }
 
   @Public()

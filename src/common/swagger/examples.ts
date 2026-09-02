@@ -43,6 +43,19 @@ export const LISTING = {
   seller: USER_STUB,
 };
 
+export const LISTING_STATS = {
+  total: 8,
+  categories: [
+    'AI Tools',
+    'Design',
+    'Privacy & Security',
+    'Productivity',
+    'Streaming',
+  ],
+  catalogueValueUsd: '231.99',
+  medianPriceUsd: '24.99',
+};
+
 export const LISTING_PAGE = {
   items: [LISTING],
   total: 8,

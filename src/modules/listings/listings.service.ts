@@ -8,7 +8,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { toFixed2 } from '../../common/money';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
-import { QueryListingsDto } from './dto/query-listings.dto';
+import { ListingSort, QueryListingsDto } from './dto/query-listings.dto';
 
 /**
  * Explicit select — deliveryInfo is simply not fetched, so no listing endpoint can
@@ -32,9 +32,36 @@ type SelectedListing = Prisma.ListingGetPayload<{
   select: typeof LISTING_SELECT;
 }>;
 
+const ORDER_BY: Record<ListingSort, Prisma.ListingOrderByWithRelationInput> = {
+  [ListingSort.NEWEST]: { createdAt: 'desc' },
+  [ListingSort.OLDEST]: { createdAt: 'asc' },
+  [ListingSort.PRICE_ASC]: { priceUsd: 'asc' },
+  [ListingSort.PRICE_DESC]: { priceUsd: 'desc' },
+};
+
 @Injectable()
 export class ListingsService {
   constructor(private readonly prisma: PrismaService) {}
+
+  /** search / category / price-range, shared by the public feed and "my listings". */
+  private filters(q: QueryListingsDto): Prisma.ListingWhereInput {
+    return {
+      ...(q.search
+        ? { title: { contains: q.search, mode: 'insensitive' } }
+        : {}),
+      ...(q.category
+        ? { category: { equals: q.category, mode: 'insensitive' } }
+        : {}),
+      ...(q.minPrice !== undefined || q.maxPrice !== undefined
+        ? {
+            priceUsd: {
+              ...(q.minPrice !== undefined ? { gte: q.minPrice } : {}),
+              ...(q.maxPrice !== undefined ? { lte: q.maxPrice } : {}),
+            },
+          }
+        : {}),
+    };
+  }
 
   private map(l: SelectedListing) {
     return { ...l, priceUsd: toFixed2(l.priceUsd) };
@@ -43,19 +70,14 @@ export class ListingsService {
   async findPublic(q: QueryListingsDto) {
     const where: Prisma.ListingWhereInput = {
       status: ListingStatus.ACTIVE,
-      ...(q.search
-        ? { title: { contains: q.search, mode: 'insensitive' } }
-        : {}),
-      ...(q.category
-        ? { category: { equals: q.category, mode: 'insensitive' } }
-        : {}),
+      ...this.filters(q),
     };
 
     const [items, total] = await this.prisma.$transaction([
       this.prisma.listing.findMany({
         where,
         select: LISTING_SELECT,
-        orderBy: { createdAt: 'desc' },
+        orderBy: ORDER_BY[q.sort] ?? ORDER_BY[ListingSort.NEWEST],
         skip: (q.page - 1) * q.limit,
         take: q.limit,
       }),
@@ -80,13 +102,67 @@ export class ListingsService {
     return this.map(listing);
   }
 
-  async findMine(sellerId: string) {
-    const items = await this.prisma.listing.findMany({
-      where: { sellerId, status: { not: ListingStatus.DELETED } },
-      select: LISTING_SELECT,
-      orderBy: { createdAt: 'desc' },
-    });
-    return items.map((l) => this.map(l));
+  async findMine(sellerId: string, q: QueryListingsDto) {
+    const where: Prisma.ListingWhereInput = {
+      sellerId,
+      status: { not: ListingStatus.DELETED },
+      ...this.filters(q),
+    };
+
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.listing.findMany({
+        where,
+        select: LISTING_SELECT,
+        orderBy: ORDER_BY[q.sort] ?? ORDER_BY[ListingSort.NEWEST],
+        skip: (q.page - 1) * q.limit,
+        take: q.limit,
+      }),
+      this.prisma.listing.count({ where }),
+    ]);
+
+    return {
+      items: items.map((l) => this.map(l)),
+      total,
+      page: q.page,
+      limit: q.limit,
+      pages: Math.ceil(total / q.limit),
+    };
+  }
+
+  /**
+   * Marketplace headline numbers, computed in the database. The frontend used to
+   * average a page of listings client-side, which quietly went wrong past one page.
+   */
+  async stats() {
+    const [[row], categoryRows] = await Promise.all([
+      this.prisma.$queryRaw<
+        { total: bigint; value: string | null; median: string | null }[]
+      >`
+        SELECT COUNT(*)::bigint                                          AS total,
+               COALESCE(SUM("priceUsd"), 0)::text                        AS value,
+               COALESCE(
+                 percentile_cont(0.5) WITHIN GROUP (ORDER BY "priceUsd"), 0
+               )::text                                                   AS median
+        FROM "Listing"
+        WHERE "status" = 'ACTIVE'
+      `,
+      // Also the source for the marketplace category dropdown.
+      this.prisma.listing.findMany({
+        where: { status: ListingStatus.ACTIVE, category: { not: null } },
+        distinct: ['category'],
+        select: { category: true },
+        orderBy: { category: 'asc' },
+      }),
+    ]);
+
+    return {
+      total: Number(row?.total ?? 0),
+      categories: categoryRows
+        .map((c) => c.category)
+        .filter((c): c is string => !!c),
+      catalogueValueUsd: toFixed2(new Prisma.Decimal(row?.value ?? 0)),
+      medianPriceUsd: toFixed2(new Prisma.Decimal(row?.median ?? 0)),
+    };
   }
 
   async create(sellerId: string, dto: CreateListingDto) {

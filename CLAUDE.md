@@ -335,10 +335,13 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
 - `PATCH /api/me` → `{ username?, telegramUsername? }`
 
 ### Listings
-- `GET  /api/listings` **(public)** → `?search=&category=&page=&limit=` — only `ACTIVE`,
-  **never** returns `deliveryInfo`
+- `GET  /api/listings` **(public)** → `?search=&category=&minPrice=&maxPrice=&sort=&page=&limit=`
+  — only `ACTIVE`, **never** returns `deliveryInfo`. `sort` is
+  `newest` (default) | `oldest` | `price_asc` | `price_desc`.
+- `GET  /api/listings/stats` **(public)** → `{ total, categories[], catalogueValueUsd, medianPriceUsd }`
+  — counted over every `ACTIVE` listing in SQL. The FE must not average a page of results instead.
 - `GET  /api/listings/:id` **(public)** — no `deliveryInfo`
-- `GET  /api/listings/mine`
+- `GET  /api/listings/mine` → same filters as the public feed, paginated (includes `PAUSED`)
 - `POST /api/listings` → `{ title, description, category?, imageUrl?, priceUsd, deliveryInfo? }`
   - `imageUrl` is a plain external http(s) link (validated, max 2048 chars). We store the link and
     nothing else — no uploads, no hosting, no resizing.
