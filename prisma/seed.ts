@@ -78,6 +78,7 @@ type UserKey = keyof typeof USERS;
 const LISTINGS = [
   {
     id: 'lst_youtube',
+    imageUrl: 'https://picsum.photos/seed/kolo-youtube/800/500',
     seller: 'elena' as UserKey,
     title: 'YouTube Premium — 12 months on your own account',
     description:
@@ -90,6 +91,7 @@ const LISTINGS = [
   },
   {
     id: 'lst_spotify',
+    imageUrl: 'https://picsum.photos/seed/kolo-spotify/800/500',
     seller: 'elena' as UserKey,
     title: 'Spotify Premium Individual — 6 months',
     description:
@@ -102,6 +104,7 @@ const LISTINGS = [
   },
   {
     id: 'lst_canva',
+    imageUrl: 'https://picsum.photos/seed/kolo-canva/800/500',
     seller: 'elena' as UserKey,
     title: 'Canva Pro — 1 year, your own account',
     description:
@@ -114,6 +117,7 @@ const LISTINGS = [
   },
   {
     id: 'lst_chatgpt',
+    imageUrl: 'https://picsum.photos/seed/kolo-chatgpt/800/500',
     seller: 'marcus' as UserKey,
     title: 'ChatGPT Plus — 1 month on your account',
     description:
@@ -126,6 +130,7 @@ const LISTINGS = [
   },
   {
     id: 'lst_netflix',
+    imageUrl: 'https://picsum.photos/seed/kolo-netflix/800/500',
     seller: 'marcus' as UserKey,
     title: 'Netflix Premium 4K — 3 months (private profile)',
     description:
@@ -138,6 +143,7 @@ const LISTINGS = [
   },
   {
     id: 'lst_nordvpn',
+    imageUrl: 'https://picsum.photos/seed/kolo-nordvpn/800/500',
     seller: 'marcus' as UserKey,
     title: 'NordVPN — 2 year plan, fresh account',
     description:
@@ -150,6 +156,7 @@ const LISTINGS = [
   },
   {
     id: 'lst_notion',
+    imageUrl: 'https://picsum.photos/seed/kolo-notion/800/500',
     seller: 'priya' as UserKey,
     title: 'Notion Plus — 1 year for your workspace',
     description:
@@ -162,6 +169,7 @@ const LISTINGS = [
   },
   {
     id: 'lst_adobe',
+    imageUrl: 'https://picsum.photos/seed/kolo-adobe/800/500',
     seller: 'priya' as UserKey,
     title: 'Adobe Creative Cloud Photography — 3 months',
     description:
@@ -359,6 +367,7 @@ async function main() {
         title: l.title,
         description: l.description,
         category: l.category,
+        imageUrl: l.imageUrl,
         priceUsd: new Prisma.Decimal(l.priceUsd),
         deliveryInfo: l.deliveryInfo,
         status: ListingStatus.ACTIVE,

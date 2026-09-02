@@ -187,6 +187,7 @@ model Listing {
   title       String
   description String
   category    String?       // free text, no separate table
+  imageUrl    String?       // external cover-image URL; we store the link only
   priceUsd    Decimal       @db.Decimal(18, 2)
   // shown to the buyer only after payment (credentials, instructions, contact)
   deliveryInfo String?
@@ -338,7 +339,9 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
   **never** returns `deliveryInfo`
 - `GET  /api/listings/:id` **(public)** — no `deliveryInfo`
 - `GET  /api/listings/mine`
-- `POST /api/listings` → `{ title, description, category?, priceUsd, deliveryInfo? }`
+- `POST /api/listings` → `{ title, description, category?, imageUrl?, priceUsd, deliveryInfo? }`
+  - `imageUrl` is a plain external http(s) link (validated, max 2048 chars). We store the link and
+    nothing else — no uploads, no hosting, no resizing.
 - `PATCH /api/listings/:id` (owner only)
 - `DELETE /api/listings/:id` (owner only → status `DELETED`)
 

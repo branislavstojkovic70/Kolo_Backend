@@ -5,6 +5,7 @@ import {
   IsOptional,
   IsPositive,
   IsString,
+  IsUrl,
   Max,
   MaxLength,
   MinLength,
@@ -28,6 +29,17 @@ export class CreateListingDto {
   @IsString()
   @MaxLength(60)
   category?: string;
+
+  @ApiPropertyOptional({
+    example: 'https://images.example.com/youtube-premium.jpg',
+    description:
+      'Cover image URL shown on the marketplace card and the detail page. ' +
+      'We only store the link — nothing is uploaded or hosted here.',
+  })
+  @IsOptional()
+  @IsUrl({ protocols: ['http', 'https'], require_protocol: true })
+  @MaxLength(2048)
+  imageUrl?: string;
 
   @ApiProperty({ example: 24.99, description: 'USD, 2 decimals' })
   @Type(() => Number)

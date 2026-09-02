@@ -35,6 +35,7 @@ export const LISTING = {
   title: 'YouTube Premium — 12 months on your own account',
   description: 'Family-plan invite for the Google account you already use…',
   category: 'Streaming',
+  imageUrl: 'https://images.example.com/youtube-premium.jpg',
   priceUsd: '24.99',
   status: 'ACTIVE',
   createdAt: '2026-06-29T09:00:00.000Z',

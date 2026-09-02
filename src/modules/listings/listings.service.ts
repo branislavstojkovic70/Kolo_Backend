@@ -20,6 +20,7 @@ const LISTING_SELECT = {
   title: true,
   description: true,
   category: true,
+  imageUrl: true,
   priceUsd: true,
   status: true,
   createdAt: true,
@@ -95,6 +96,7 @@ export class ListingsService {
         title: dto.title,
         description: dto.description,
         category: dto.category,
+        imageUrl: dto.imageUrl,
         priceUsd: new Prisma.Decimal(dto.priceUsd).toFixed(2),
         deliveryInfo: dto.deliveryInfo,
       },
@@ -112,6 +114,7 @@ export class ListingsService {
         title: dto.title,
         description: dto.description,
         category: dto.category,
+        imageUrl: dto.imageUrl,
         deliveryInfo: dto.deliveryInfo,
         status: dto.status,
         ...(dto.priceUsd !== undefined

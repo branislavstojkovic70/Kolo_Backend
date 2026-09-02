@@ -68,6 +68,9 @@ model Listing {
   title        String
   description  String
   category     String? // free text, no separate table
+  // cover art shown on the marketplace card and the detail page — a plain
+  // external URL, no upload/hosting on our side
+  imageUrl     String?
   priceUsd     Decimal       @db.Decimal(18, 2)
   // shown to the buyer only after payment (credentials, instructions, contact)
   deliveryInfo String?
