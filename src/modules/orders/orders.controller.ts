@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import {
   ApiBadGatewayResponse,
   ApiBadRequestResponse,
@@ -16,6 +16,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ErrorResponseDto } from '../../common/dto/error-response.dto';
 import * as EX from '../../common/swagger/examples';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { QueryOrdersDto } from './dto/query-orders.dto';
 import { OrdersService } from './orders.service';
 
 @ApiTags('orders')
@@ -54,29 +55,52 @@ export class OrdersController {
     return this.orders.create(user.id, dto.listingId);
   }
 
+  @Get()
+  @ApiOperation({
+    summary: 'My orders — both sides, one paginated list',
+    description:
+      'Newest first. `role` picks the side (`all` by default, or `buying` / `selling`), ' +
+      '`search` matches the snapshotted title and `status` filters by order status. ' +
+      'Use this instead of merging `/purchases` and `/sales`: two paginated lists cannot ' +
+      'be combined into one page. Never includes `deliveryInfo`.',
+  })
+  @ApiOkResponse({
+    description: 'My orders',
+    schema: { example: EX.ORDER_PAGE },
+  })
+  findAll(@CurrentUser() user: User, @Query() query: QueryOrdersDto) {
+    return this.orders.findAll(user.id, query);
+  }
+
   @Get('purchases')
   @ApiOperation({
     summary: 'Orders I placed',
     description:
-      'Newest first. Never includes `deliveryInfo` — fetch the single order for that.',
+      'Newest first, paginated. Optional `search` matches the snapshotted title, ' +
+      '`status` filters by order status. Never includes `deliveryInfo` — fetch the ' +
+      'single order for that.',
   })
   @ApiOkResponse({
     description: 'My purchases',
-    schema: { example: [EX.ORDER] },
+    schema: { example: EX.ORDER_PAGE },
   })
-  purchases(@CurrentUser() user: User) {
-    return this.orders.findPurchases(user.id);
+  purchases(@CurrentUser() user: User, @Query() query: QueryOrdersDto) {
+    return this.orders.findPurchases(user.id, query);
   }
 
   @Get('sales')
   @ApiOperation({
     summary: 'Orders on my listings',
     description:
-      'Newest first. `sellerAmountUsd` is what lands in escrow for me.',
+      'Newest first, paginated, same `search` / `status` filters as purchases. ' +
+      '`sellerAmountUsd` is what lands in escrow for me.',
   })
-  @ApiOkResponse({ description: 'My sales', schema: { example: [EX.ORDER] } })
-  sales(@CurrentUser() user: User) {
-    return this.orders.findSales(user.id);
+  @ApiOkResponse({
+    description: 'My sales',
+    schema: { example: EX.ORDER_PAGE },
+  })
+  sales(@CurrentUser() user: User, @Query() query: QueryOrdersDto) {
+    return this.orders.findSales(user.id, query);
   }
 
   @Get(':id')

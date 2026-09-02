@@ -11,6 +11,7 @@ import { ListingStatus, OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { calcFee, toFixed2 } from '../../common/money';
 import { OxapayService } from '../payments/oxapay.service';
+import { OrderRole, QueryOrdersDto } from './dto/query-orders.dto';
 
 /** deliveryInfo is deliberately absent — it is fetched separately, only when allowed. */
 const ORDER_SELECT = {
@@ -133,22 +134,57 @@ export class OrdersService {
     return { order: this.map(updated), paymentUrl: invoice.payment_url };
   }
 
-  async findPurchases(buyerId: string) {
-    const orders = await this.prisma.order.findMany({
-      where: { buyerId },
-      select: ORDER_SELECT,
-      orderBy: { createdAt: 'desc' },
-    });
-    return orders.map((o) => this.map(o));
+  /**
+   * Both sides in one page. `/purchases` and `/sales` stay as they were, but a
+   * combined "all my orders" list cannot be built by merging two paginated
+   * responses — the page boundaries would not line up — so it needs its own query.
+   */
+  findAll(userId: string, q: QueryOrdersDto) {
+    const side: Prisma.OrderWhereInput =
+      q.role === OrderRole.BUYING
+        ? { buyerId: userId }
+        : q.role === OrderRole.SELLING
+          ? { sellerId: userId }
+          : { OR: [{ buyerId: userId }, { sellerId: userId }] };
+    return this.findPage(side, q);
   }
 
-  async findSales(sellerId: string) {
-    const orders = await this.prisma.order.findMany({
-      where: { sellerId },
-      select: ORDER_SELECT,
-      orderBy: { createdAt: 'desc' },
-    });
-    return orders.map((o) => this.map(o));
+  findPurchases(buyerId: string, q: QueryOrdersDto) {
+    return this.findPage({ buyerId }, q);
+  }
+
+  findSales(sellerId: string, q: QueryOrdersDto) {
+    return this.findPage({ sellerId }, q);
+  }
+
+  /** Shared list query for purchases and sales — same filters, different side. */
+  private async findPage(side: Prisma.OrderWhereInput, q: QueryOrdersDto) {
+    const where: Prisma.OrderWhereInput = {
+      ...side,
+      ...(q.search
+        ? { titleSnapshot: { contains: q.search, mode: 'insensitive' } }
+        : {}),
+      ...(q.status ? { status: q.status } : {}),
+    };
+
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.order.findMany({
+        where,
+        select: ORDER_SELECT,
+        orderBy: { createdAt: 'desc' },
+        skip: (q.page - 1) * q.limit,
+        take: q.limit,
+      }),
+      this.prisma.order.count({ where }),
+    ]);
+
+    return {
+      items: items.map((o) => this.map(o)),
+      total,
+      page: q.page,
+      limit: q.limit,
+      pages: Math.ceil(total / q.limit),
+    };
   }
 
   async findOne(id: string, userId: string) {

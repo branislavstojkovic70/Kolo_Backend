@@ -85,6 +85,14 @@ export const ORDER_CREATED = {
 };
 
 /** deliveryInfo appears ONLY here: caller is the buyer and the order is PAID/DISPUTED/REFUNDED. */
+export const ORDER_PAGE = {
+  items: [ORDER],
+  total: 4,
+  page: 1,
+  limit: 20,
+  pages: 1,
+};
+
 export const ORDER_DETAIL = {
   ...ORDER,
   deliveryInfo:
@@ -173,6 +181,14 @@ export const DISPUTE = {
 export const DISPUTE_CREATED = {
   dispute: DISPUTE,
   telegramInviteLink: 'https://t.me/+AbCdEfGhIjKlMnOp',
+};
+
+export const DISPUTE_PAGE = {
+  items: [DISPUTE],
+  total: 2,
+  page: 1,
+  limit: 20,
+  pages: 1,
 };
 
 export const ADMIN_DISPUTE = {

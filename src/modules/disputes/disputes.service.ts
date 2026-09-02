@@ -12,6 +12,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { toFixed2 } from '../../common/money';
 import { TelegramService } from '../telegram/telegram.service';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
+import { QueryDisputesDto } from './dto/query-disputes.dto';
 
 const DISPUTE_SELECT = {
   id: true,
@@ -167,15 +168,38 @@ export class DisputesService {
     return { dispute: this.map(full), telegramInviteLink };
   }
 
-  async findMine(userId: string) {
-    const disputes = await this.prisma.dispute.findMany({
-      where: {
-        order: { is: { OR: [{ buyerId: userId }, { sellerId: userId }] } },
+  async findMine(userId: string, q: QueryDisputesDto) {
+    const where: Prisma.DisputeWhereInput = {
+      order: {
+        is: {
+          OR: [{ buyerId: userId }, { sellerId: userId }],
+          // Search hits the disputed order's title, which is what the list shows.
+          ...(q.search
+            ? { titleSnapshot: { contains: q.search, mode: 'insensitive' } }
+            : {}),
+        },
       },
-      select: DISPUTE_SELECT,
-      orderBy: { createdAt: 'desc' },
-    });
-    return disputes.map((d) => this.map(d));
+      ...(q.status ? { status: q.status } : {}),
+    };
+
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.dispute.findMany({
+        where,
+        select: DISPUTE_SELECT,
+        orderBy: { createdAt: 'desc' },
+        skip: (q.page - 1) * q.limit,
+        take: q.limit,
+      }),
+      this.prisma.dispute.count({ where }),
+    ]);
+
+    return {
+      items: items.map((d) => this.map(d)),
+      total,
+      page: q.page,
+      limit: q.limit,
+      pages: Math.ceil(total / q.limit),
+    };
   }
 
   /** Buyer, seller and admin all get the invite link so the FE can show "Join dispute chat". */

@@ -350,8 +350,11 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
   - reject if buyer === seller, or listing not `ACTIVE`
   - compute fee, create order `PENDING_PAYMENT`, call OxaPay invoice, store
     `oxapayTrackId` + `paymentUrl`, return `{ order, paymentUrl }`
-- `GET  /api/orders/purchases`
-- `GET  /api/orders/sales`
+- `GET  /api/orders` → `?role=all|buying|selling&search=&status=&page=&limit=` → `Page<Order>`
+  - The list the FE uses. Two separately paginated lists cannot be merged into one page, so the
+    combined "all my orders" view needs its own query.
+- `GET  /api/orders/purchases` → same filters, buyer side only → `Page<Order>`
+- `GET  /api/orders/sales` → same filters, seller side only → `Page<Order>`
 - `GET  /api/orders/:id` — buyer or seller only. `deliveryInfo` included **only** for the
   buyer and **only** when status is `PAID` / `DISPUTED` / `REFUNDED`.
 
@@ -365,7 +368,8 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
 ### Disputes
 - `POST /api/orders/:id/dispute` → `{ reason }` (buyer only) → creates dispute + Telegram group,
   responds with `telegramInviteLink` (may be `null` if Telegram failed)
-- `GET  /api/disputes/mine`
+- `GET  /api/disputes/mine` → `?search=&status=&page=&limit=` → `Page<Dispute>`
+  (`search` matches the disputed order's title)
 - `GET  /api/disputes/:id` (buyer, seller or admin) — includes `telegramInviteLink` for all three,
   so the FE can render a "Join dispute chat" button on the order view for **both** parties
 

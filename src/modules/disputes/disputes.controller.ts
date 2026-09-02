@@ -1,4 +1,12 @@
-import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -16,6 +24,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ErrorResponseDto } from '../../common/dto/error-response.dto';
 import * as EX from '../../common/swagger/examples';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
+import { QueryDisputesDto } from './dto/query-disputes.dto';
 import { DisputesService } from './disputes.service';
 
 @ApiTags('disputes')
@@ -70,14 +79,16 @@ export class DisputesController {
   @Get('disputes/mine')
   @ApiOperation({
     summary: 'Disputes where I am the buyer or the seller',
-    description: 'Newest first, resolved ones included.',
+    description:
+      'Newest first, resolved ones included, paginated. `search` matches the disputed ' +
+      "order's title, `status` filters by dispute status.",
   })
   @ApiOkResponse({
     description: 'My disputes',
-    schema: { example: [EX.DISPUTE] },
+    schema: { example: EX.DISPUTE_PAGE },
   })
-  mine(@CurrentUser() user: User) {
-    return this.disputes.findMine(user.id);
+  mine(@CurrentUser() user: User, @Query() query: QueryDisputesDto) {
+    return this.disputes.findMine(user.id, query);
   }
 
   @Get('disputes/:id')
