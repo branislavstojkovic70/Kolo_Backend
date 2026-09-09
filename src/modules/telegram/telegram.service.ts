@@ -212,10 +212,14 @@ export class TelegramService {
       }
     }
 
+    // A bare positive id is read as a PeerUser by GramJS, so every peer argument
+    // from here on has to say "this is a basic group" explicitly.
+    const peer = new Api.InputPeerChat({ chatId: chat.id });
+
     // 3. Export the invite link. This is the only way buyer and seller get in,
     //    so a failure here must fail the whole call and leave the fields null.
     const invite: any = await client.invoke(
-      new Api.messages.ExportChatInvite({ peer: chat.id }),
+      new Api.messages.ExportChatInvite({ peer }),
     );
     const inviteLink: string | undefined = invite?.link;
     if (!inviteLink) {
@@ -224,7 +228,7 @@ export class TelegramService {
 
     // 4. Opening message.
     try {
-      await client.sendMessage(chat.id, { message });
+      await client.sendMessage(peer, { message });
     } catch (e) {
       this.logger.warn(
         `Could not post the opening message to ${chatId}: ${e?.message}`,
