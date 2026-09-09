@@ -1,6 +1,7 @@
 import {
   BadGatewayException,
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -83,6 +84,21 @@ export class OrdersService {
       throw new BadRequestException('You cannot buy your own listing');
     }
 
+    // Claim one unit. A single conditional UPDATE, so two buyers racing for the
+    // last unit can never both win — the loser's updateMany matches no row.
+    const claimed = await this.prisma.listing.updateMany({
+      where: {
+        id: listing.id,
+        status: ListingStatus.ACTIVE,
+        soldCount: { lt: this.prisma.listing.fields.quantity },
+      },
+      data: { soldCount: { increment: 1 } },
+    });
+    if (claimed.count === 0) {
+      throw new ConflictException('This listing just sold out');
+    }
+    await this.markSoldOutIfClaimed(listing.id);
+
     const feePercent = this.config.get<number>('platformFeePercent') ?? 5;
     const { amountUsd, feeUsd, sellerAmountUsd } = calcFee(
       listing.priceUsd,
@@ -114,9 +130,12 @@ export class OrdersService {
       });
     } catch (e) {
       // Leave the row PENDING_PAYMENT with a null trackId — never delete it.
+      // The unit goes back on the shelf though: without an invoice this order can
+      // never be paid, and an OxaPay outage must not sell a listing out.
       this.logger.error(
         `Invoice creation failed for order ${order.id}: ${e?.message}`,
       );
+      await this.releaseUnit(listing.id);
       throw new BadGatewayException(
         'Could not create the payment invoice. The order was saved — please retry payment.',
       );
@@ -132,6 +151,34 @@ export class OrdersService {
     });
 
     return { order: this.map(updated), paymentUrl: invoice.payment_url };
+  }
+
+  /** Off the marketplace as soon as the last unit is claimed. */
+  private async markSoldOutIfClaimed(listingId: string) {
+    await this.prisma.listing.updateMany({
+      where: {
+        id: listingId,
+        status: ListingStatus.ACTIVE,
+        soldCount: { gte: this.prisma.listing.fields.quantity },
+      },
+      data: { status: ListingStatus.SOLD_OUT },
+    });
+  }
+
+  /** Give a claimed unit back and put a sold-out listing back on the marketplace. */
+  private async releaseUnit(listingId: string) {
+    await this.prisma.listing.updateMany({
+      where: { id: listingId, soldCount: { gt: 0 } },
+      data: { soldCount: { decrement: 1 } },
+    });
+    await this.prisma.listing.updateMany({
+      where: {
+        id: listingId,
+        status: ListingStatus.SOLD_OUT,
+        soldCount: { lt: this.prisma.listing.fields.quantity },
+      },
+      data: { status: ListingStatus.ACTIVE },
+    });
   }
 
   /**

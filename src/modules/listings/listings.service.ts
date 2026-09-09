@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -22,6 +23,8 @@ const LISTING_SELECT = {
   category: true,
   imageUrl: true,
   priceUsd: true,
+  quantity: true,
+  soldCount: true,
   status: true,
   createdAt: true,
   updatedAt: true,
@@ -175,6 +178,7 @@ export class ListingsService {
         imageUrl: dto.imageUrl,
         priceUsd: new Prisma.Decimal(dto.priceUsd).toFixed(2),
         deliveryInfo: dto.deliveryInfo,
+        quantity: dto.quantity ?? 1,
       },
       select: LISTING_SELECT,
     });
@@ -182,7 +186,29 @@ export class ListingsService {
   }
 
   async update(id: string, sellerId: string, dto: UpdateListingDto) {
-    await this.assertOwner(id, sellerId);
+    const current = await this.assertOwner(id, sellerId);
+
+    // Restocking revives a sold-out listing; shrinking below what is already sold
+    // is not a thing that can happen, so it is a 400 rather than a silent clamp.
+    if (dto.quantity !== undefined && dto.quantity < current.soldCount) {
+      throw new BadRequestException(
+        `You have already sold ${current.soldCount} of these — the quantity cannot go below that`,
+      );
+    }
+
+    const quantity = dto.quantity ?? current.quantity;
+    const soldOut = current.soldCount >= quantity;
+
+    // Stock has the last word: a seller cannot re-activate a listing with nothing
+    // left to sell, and restocking a sold-out one puts it back on the marketplace.
+    // Anything else (PAUSED in particular) is left exactly as asked for.
+    const requested = dto.status ?? current.status;
+    const status =
+      soldOut && requested === ListingStatus.ACTIVE
+        ? ListingStatus.SOLD_OUT
+        : !soldOut && requested === ListingStatus.SOLD_OUT
+          ? ListingStatus.ACTIVE
+          : requested;
 
     const listing = await this.prisma.listing.update({
       where: { id },
@@ -192,7 +218,8 @@ export class ListingsService {
         category: dto.category,
         imageUrl: dto.imageUrl,
         deliveryInfo: dto.deliveryInfo,
-        status: dto.status,
+        status,
+        ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
         ...(dto.priceUsd !== undefined
           ? { priceUsd: new Prisma.Decimal(dto.priceUsd).toFixed(2) }
           : {}),
@@ -214,7 +241,12 @@ export class ListingsService {
   private async assertOwner(id: string, sellerId: string) {
     const listing = await this.prisma.listing.findUnique({
       where: { id },
-      select: { sellerId: true, status: true },
+      select: {
+        sellerId: true,
+        status: true,
+        quantity: true,
+        soldCount: true,
+      },
     });
     if (!listing || listing.status === ListingStatus.DELETED) {
       throw new NotFoundException('Listing not found');
@@ -222,5 +254,6 @@ export class ListingsService {
     if (listing.sellerId !== sellerId) {
       throw new ForbiddenException('You do not own this listing');
     }
+    return listing;
   }
 }

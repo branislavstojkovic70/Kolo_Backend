@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { OrderStatus, Prisma, WithdrawalStatus } from '@prisma/client';
+import {
+  ListingStatus,
+  OrderStatus,
+  Prisma,
+  WithdrawalStatus,
+} from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 
@@ -118,6 +123,9 @@ export class WebhooksService {
         where: { id: order.id },
         data: { status: OrderStatus.EXPIRED },
       });
+      // The unit this order claimed goes back on the shelf. Guarded by the
+      // PENDING_PAYMENT check above, so one order can never release twice.
+      await this.releaseListingUnit(order.listingId);
       this.logger.log(`Order ${order.id} EXPIRED (webhook status "${status}")`);
       return;
     }
@@ -125,6 +133,25 @@ export class WebhooksService {
     this.logger.log(
       `Ignoring payment webhook status "${status}" for order ${order.id}`,
     );
+  }
+
+  /**
+   * Mirror of OrdersService.releaseUnit — an expired invoice frees the unit it
+   * claimed and brings a sold-out listing back to the marketplace.
+   */
+  private async releaseListingUnit(listingId: string) {
+    await this.prisma.listing.updateMany({
+      where: { id: listingId, soldCount: { gt: 0 } },
+      data: { soldCount: { decrement: 1 } },
+    });
+    await this.prisma.listing.updateMany({
+      where: {
+        id: listingId,
+        status: ListingStatus.SOLD_OUT,
+        soldCount: { lt: this.prisma.listing.fields.quantity },
+      },
+      data: { status: ListingStatus.ACTIVE },
+    });
   }
 
   async handlePayout(body: any): Promise<void> {

@@ -84,6 +84,7 @@ const LISTINGS = [
     description:
       'Family-plan invite for the Google account you already use. Ad-free video, background play and YouTube Music for a full year. No password sharing, nothing to install, works worldwide.',
     category: 'Streaming',
+    quantity: 5,
     priceUsd: '24.99',
     deliveryInfo:
       'Send me the Gmail address on your Google account. The family invite arrives within 30 minutes — accept it and Premium is live instantly.',
@@ -97,6 +98,7 @@ const LISTINGS = [
     description:
       'Six prepaid months of Spotify Premium on your existing account. Your playlists, follows and listening history all stay exactly where they are.',
     category: 'Streaming',
+    quantity: 4,
     priceUsd: '17.50',
     deliveryInfo:
       'Redeem code: SPOT-DEMO-6MON-4417. Open spotify.com/redeem while logged in, paste the code, done.',
@@ -110,6 +112,7 @@ const LISTINGS = [
     description:
       'Canva Pro added to your own login for 12 months: 100M+ premium assets, Brand Kit, Magic Resize and the background remover.',
     category: 'Design',
+    quantity: 3,
     priceUsd: '9.00',
     deliveryInfo:
       'Reply with the e-mail on your Canva account and I send a team invite. Accept it and Pro unlocks immediately.',
@@ -123,6 +126,7 @@ const LISTINGS = [
     description:
       'One month of ChatGPT Plus applied to your own OpenAI account. Priority access at peak hours, faster responses, all the latest models.',
     category: 'AI Tools',
+    quantity: 6,
     priceUsd: '21.00',
     deliveryInfo:
       'Send the e-mail on your OpenAI account. The upgrade is applied within the hour and I send you a confirmation screenshot.',
@@ -136,6 +140,7 @@ const LISTINGS = [
     description:
       'Your own profile on a Premium 4K household for three months. Ultra HD, four streams, downloads enabled. The profile PIN is yours alone.',
     category: 'Streaming',
+    quantity: 4,
     priceUsd: '32.00',
     deliveryInfo:
       'Login: demo-netflix@example.com / Pw: DemoPass-2026 — use the profile named after your order id and set your own PIN on first login.',
@@ -149,6 +154,7 @@ const LISTINGS = [
     description:
       'Brand-new NordVPN account with 24 months prepaid. Six devices, Threat Protection, dedicated support. The credentials are yours to change on day one.',
     category: 'Privacy & Security',
+    quantity: 1,
     priceUsd: '54.00',
     deliveryInfo:
       'Account: demo-nord@example.com / Pw: NordDemo-2026 — change the password right after your first login.',
@@ -162,6 +168,7 @@ const LISTINGS = [
     description:
       'Notion Plus applied to your existing personal workspace for 12 months: unlimited blocks, 30-day version history, 100 guests.',
     category: 'Productivity',
+    quantity: 3,
     priceUsd: '44.00',
     deliveryInfo:
       'Send your workspace URL and the admin e-mail. Plus is applied to that workspace within a few hours.',
@@ -175,6 +182,7 @@ const LISTINGS = [
     description:
       'Lightroom + Photoshop with 20 GB of cloud storage, three months prepaid on your own Adobe ID. Desktop and mobile both included.',
     category: 'Design',
+    quantity: 5,
     priceUsd: '28.50',
     deliveryInfo:
       'Send your Adobe ID e-mail. The plan is attached to that ID and you keep every file you already have in the cloud.',
@@ -317,6 +325,15 @@ const ORDERS: OrderSpec[] = [
 
 // ----------------------------------------------------------------------------- main
 
+/**
+ * Units already claimed on a listing. Mirrors the runtime rule: every order that
+ * is not EXPIRED holds one unit, an expired invoice gives its unit back.
+ */
+const soldOf = (listingId: string) =>
+  ORDERS.filter(
+    (o) => o.listingId === listingId && o.status !== OrderStatus.EXPIRED,
+  ).length;
+
 async function wipe() {
   if (
     process.env.NODE_ENV === 'production' &&
@@ -370,7 +387,13 @@ async function main() {
         imageUrl: l.imageUrl,
         priceUsd: new Prisma.Decimal(l.priceUsd),
         deliveryInfo: l.deliveryInfo,
-        status: ListingStatus.ACTIVE,
+        quantity: l.quantity,
+        soldCount: soldOf(l.id),
+        // A listing whose units are all claimed is off the marketplace.
+        status:
+          soldOf(l.id) >= l.quantity
+            ? ListingStatus.SOLD_OUT
+            : ListingStatus.ACTIVE,
         createdAt: days(l.createdDays),
         updatedAt: days(l.createdDays),
       },

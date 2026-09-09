@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsInt,
   IsNumber,
   IsOptional,
   IsPositive,
@@ -8,6 +9,7 @@ import {
   IsUrl,
   Max,
   MaxLength,
+  Min,
   MinLength,
 } from 'class-validator';
 
@@ -47,6 +49,20 @@ export class CreateListingDto {
   @IsPositive()
   @Max(1000000)
   priceUsd: number;
+
+  @ApiPropertyOptional({
+    example: 1,
+    default: 1,
+    description:
+      'How many times this listing can be sold. The listing leaves the ' +
+      'marketplace as SOLD_OUT once that many orders exist.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(999)
+  quantity?: number;
 
   @ApiPropertyOptional({
     description:

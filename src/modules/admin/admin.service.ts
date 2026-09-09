@@ -116,9 +116,17 @@ export class AdminService {
   // ---------------------------------------------------------------- disputes
 
   async listDisputes(q: QueryAdminDisputesDto) {
-    const where: Prisma.DisputeWhereInput = q.status
-      ? { status: q.status }
-      : {};
+    const where: Prisma.DisputeWhereInput = {
+      // Search hits the disputed order's title, same as disputes/mine.
+      ...(q.search
+        ? {
+            order: {
+              is: { titleSnapshot: { contains: q.search, mode: 'insensitive' } },
+            },
+          }
+        : {}),
+      ...(q.status ? { status: q.status } : {}),
+    };
 
     const [items, total] = await this.prisma.$transaction([
       this.prisma.dispute.findMany({
