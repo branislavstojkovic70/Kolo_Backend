@@ -15,6 +15,7 @@ enum Role {
 enum ListingStatus {
   ACTIVE
   PAUSED
+  SOLD_OUT
   DELETED
 }
 
@@ -74,6 +75,11 @@ model Listing {
   priceUsd     Decimal       @db.Decimal(18, 2)
   // shown to the buyer only after payment (credentials, instructions, contact)
   deliveryInfo String?
+  // how many times this can be sold, and how many units are already claimed.
+  // A unit is claimed the moment an order is created and released if it expires;
+  // soldCount == quantity flips the listing to SOLD_OUT and off the marketplace.
+  quantity     Int           @default(1)
+  soldCount    Int           @default(0)
   status       ListingStatus @default(ACTIVE)
   orders       Order[]
 
