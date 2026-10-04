@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD } from '@nestjs/core';
 import configuration from './config/configuration';
 import { validateEnv } from './config/env.validation';
@@ -17,6 +18,7 @@ import { WalletModule } from './modules/wallet/wallet.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { DisputesModule } from './modules/disputes/disputes.module';
 import { AdminModule } from './modules/admin/admin.module';
+import { BuyRequestsModule } from './modules/buy-requests/buy-requests.module';
 import { DevModule } from './modules/dev/dev.module';
 
 @Module({
@@ -26,6 +28,8 @@ import { DevModule } from './modules/dev/dev.module';
       load: [configuration],
       validate: validateEnv,
     }),
+    // only the auto-buy cleanup cron uses this
+    ScheduleModule.forRoot(),
     PrismaModule,
     HealthModule,
     PlatformConfigModule,
@@ -33,6 +37,7 @@ import { DevModule } from './modules/dev/dev.module';
     ProductsModule,
     ListingsModule,
     OrdersModule,
+    BuyRequestsModule,
     StatsModule,
     PaymentsModule,
     WalletModule,

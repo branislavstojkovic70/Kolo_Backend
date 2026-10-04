@@ -24,6 +24,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ErrorResponseDto } from '../../common/dto/error-response.dto';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import * as EX from '../../common/swagger/examples';
+import { BuyRequestsService } from '../buy-requests/buy-requests.service';
+import { QueryBuyRequestsDto } from '../buy-requests/dto/query-buy-requests.dto';
 import { DisputesService } from '../disputes/disputes.service';
 import { AdminService } from './admin.service';
 import {
@@ -45,7 +47,23 @@ export class AdminController {
   constructor(
     private readonly admin: AdminService,
     private readonly disputes: DisputesService,
+    private readonly buyRequests: BuyRequestsService,
   ) {}
+
+  @Get('buy-requests')
+  @ApiOperation({
+    summary: 'All buy requests (auto-buy wishes)',
+    description:
+      'Newest first, paginated, with buyer, product and the matched order when there is one. ' +
+      'Filter with `?status=ACTIVE` / `MATCHED` / `FULFILLED` / `CANCELLED` / `EXPIRED`.',
+  })
+  @ApiOkResponse({
+    description: 'Paginated buy requests',
+    schema: { example: EX.ADMIN_BUY_REQUEST_PAGE },
+  })
+  listBuyRequests(@Query() q: QueryBuyRequestsDto) {
+    return this.buyRequests.adminList(q);
+  }
 
   @Get('disputes')
   @ApiOperation({

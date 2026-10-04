@@ -41,6 +41,16 @@ const ORDER_SELECT = {
 
 type SelectedOrder = Prisma.OrderGetPayload<{ select: typeof ORDER_SELECT }>;
 
+/** Everything the shared order-creation path needs to know about the listing. */
+export interface ListingForOrder {
+  id: string;
+  sellerId: string;
+  title: string;
+  priceUsd: Prisma.Decimal;
+  productId: string;
+  product: { retailPriceUsd: Prisma.Decimal };
+}
+
 /** Statuses where the buyer has actually paid and may see the delivery details. */
 const DELIVERED_STATUSES: OrderStatus[] = [
   OrderStatus.PAID,
@@ -82,7 +92,15 @@ export class OrdersService {
       },
     });
 
-    if (!listing || listing.status !== ListingStatus.ACTIVE) {
+    if (!listing) {
+      throw new NotFoundException('Listing not found or not available');
+    }
+    if (listing.status === ListingStatus.RESERVED) {
+      throw new BadRequestException(
+        'This listing is reserved for another buyer right now. If their payment window expires it comes back on the marketplace.',
+      );
+    }
+    if (listing.status !== ListingStatus.ACTIVE) {
       throw new NotFoundException('Listing not found or not available');
     }
     if (listing.sellerId === buyerId) {
@@ -104,14 +122,45 @@ export class OrdersService {
     }
     await this.markSoldOutIfClaimed(listing.id);
 
+    // Created first so a failing OxaPay call still leaves an auditable row.
+    const order = await this.createPendingOrderRow(buyerId, listing);
+
+    let updated: SelectedOrder;
+    try {
+      updated = await this.attachInvoice(order);
+    } catch (e) {
+      // Leave the row PENDING_PAYMENT with a null trackId — never delete it.
+      // The unit goes back on the shelf though: without an invoice this order can
+      // never be paid, and an OxaPay outage must not sell a listing out.
+      this.logger.error(
+        `Invoice creation failed for order ${order.id}: ${e?.message}`,
+      );
+      await this.releaseUnit(listing.id);
+      throw new BadGatewayException(
+        'Could not create the payment invoice. The order was saved — please retry payment.',
+      );
+    }
+
+    return { order: this.map(updated), paymentUrl: updated.paymentUrl };
+  }
+
+  /**
+   * The one place a PENDING_PAYMENT order row is built — fee split, snapshots,
+   * beneficiary. Shared by the manual buy flow and AutoBuyService so the two can
+   * never drift apart. Pass `tx` to create the row inside a caller's transaction.
+   */
+  async createPendingOrderRow(
+    buyerId: string,
+    listing: ListingForOrder,
+    tx: Prisma.TransactionClient = this.prisma,
+  ): Promise<SelectedOrder> {
     const feePercent = this.config.get<number>('platformFeePercent') ?? 5;
     const { amountUsd, feeUsd, sellerAmountUsd } = calcFee(
       listing.priceUsd,
       feePercent,
     );
 
-    // Created first so a failing OxaPay call still leaves an auditable row.
-    const order = await this.prisma.order.create({
+    return tx.order.create({
       data: {
         listingId: listing.id,
         buyerId,
@@ -128,28 +177,20 @@ export class OrdersService {
       },
       select: ORDER_SELECT,
     });
+  }
 
-    let invoice: { track_id: string; payment_url: string };
-    try {
-      invoice = await this.oxapay.createInvoice({
-        orderId: order.id,
-        amountUsd: toFixed2(amountUsd),
-        description: listing.title,
-      });
-    } catch (e) {
-      // Leave the row PENDING_PAYMENT with a null trackId — never delete it.
-      // The unit goes back on the shelf though: without an invoice this order can
-      // never be paid, and an OxaPay outage must not sell a listing out.
-      this.logger.error(
-        `Invoice creation failed for order ${order.id}: ${e?.message}`,
-      );
-      await this.releaseUnit(listing.id);
-      throw new BadGatewayException(
-        'Could not create the payment invoice. The order was saved — please retry payment.',
-      );
-    }
+  /**
+   * Shared invoice step: asks OxaPay (mock-aware) and stores trackId + paymentUrl.
+   * Throws on OxaPay failure — the caller decides how to compensate.
+   */
+  async attachInvoice(order: SelectedOrder): Promise<SelectedOrder> {
+    const invoice = await this.oxapay.createInvoice({
+      orderId: order.id,
+      amountUsd: toFixed2(order.amountUsd),
+      description: order.titleSnapshot,
+    });
 
-    const updated = await this.prisma.order.update({
+    return this.prisma.order.update({
       where: { id: order.id },
       data: {
         oxapayTrackId: invoice.track_id,
@@ -157,8 +198,6 @@ export class OrdersService {
       },
       select: ORDER_SELECT,
     });
-
-    return { order: this.map(updated), paymentUrl: invoice.payment_url };
   }
 
   /** Off the marketplace as soon as the last unit is claimed. */

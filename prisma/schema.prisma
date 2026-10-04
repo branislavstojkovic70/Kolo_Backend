@@ -16,7 +16,20 @@ enum ListingStatus {
   ACTIVE
   PAUSED
   SOLD_OUT
+  // held for an auto-buy buyer until reservedUntil — invisible in the public
+  // feed and not manually buyable while in this state
+  RESERVED
+  // an auto-buy order on this listing was paid
+  SOLD
   DELETED
+}
+
+enum BuyRequestStatus {
+  ACTIVE
+  MATCHED
+  FULFILLED
+  CANCELLED
+  EXPIRED
 }
 
 enum OrderStatus {
@@ -52,8 +65,9 @@ model Product {
   imageUrl       String?
   active         Boolean @default(true)
 
-  listings Listing[]
-  orders   Order[]
+  listings    Listing[]
+  orders      Order[]
+  buyRequests BuyRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -70,6 +84,8 @@ model User {
   role             Role    @default(USER)
 
   listings         Listing[]
+  reservedListings Listing[]    @relation("reservedListings")
+  buyRequests      BuyRequest[]
   purchases        Order[]      @relation("buyer")
   sales            Order[]      @relation("seller")
   beneficiaryOf    Order[]      @relation("beneficiary")
@@ -105,7 +121,13 @@ model Listing {
   quantity     Int           @default(1)
   soldCount    Int           @default(0)
   status       ListingStatus @default(ACTIVE)
+  // auto-buy reservation: who the listing is held for and until when. Set when a
+  // BuyRequest matches, cleared on payment (→ SOLD) or expiry (→ back to ACTIVE).
+  reservedUntil DateTime?
+  reservedForId String?
+  reservedFor   User?         @relation("reservedListings", fields: [reservedForId], references: [id])
   orders       Order[]
+  buyRequests  BuyRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -149,6 +171,9 @@ model Order {
   withdrawal   Withdrawal? @relation(fields: [withdrawalId], references: [id])
 
   dispute Dispute?
+
+  // the buy request this order fulfils, if it came from auto-buy
+  buyRequests BuyRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -195,6 +220,34 @@ model Withdrawal {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// A standing wish: "buy <product> the moment someone lists it at or under maxPriceUsd".
+// Matching is synchronous at listing/request creation; a cron only cleans up expired
+// reservations and re-matches. The buyer still pays through OxaPay like any order —
+// there is no internal deposit balance.
+model BuyRequest {
+  id          String           @id @default(cuid())
+  buyerId     String
+  buyer       User             @relation(fields: [buyerId], references: [id])
+  productId   String
+  product     Product          @relation(fields: [productId], references: [id])
+  maxPriceUsd Decimal          @db.Decimal(18, 2)
+  status      BuyRequestStatus @default(ACTIVE)
+  // optional, buyer-set: the wish lapses on its own after this
+  expiresAt   DateTime?
+
+  matchedListingId String?
+  matchedListing   Listing?  @relation(fields: [matchedListingId], references: [id])
+  matchedOrderId   String?
+  matchedOrder     Order?    @relation(fields: [matchedOrderId], references: [id])
+  matchedAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([productId, status])
+  @@index([buyerId, createdAt])
 }
 
 // idempotency guard for OxaPay callbacks

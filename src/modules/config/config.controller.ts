@@ -35,6 +35,10 @@ export class ConfigController {
       minWithdrawalUsd: Number(
         this.config.get<number>('minWithdrawalUsd'),
       ).toFixed(2),
+      // how long an auto-buy match holds the listing while the buyer pays
+      autoBuyReservationMinutes: this.config.get<number>(
+        'autoBuy.reservationMinutes',
+      ),
       payoutCurrencies: ['USDT', 'USDC', 'TRX', 'TON', 'BTC', 'ETH'],
       payoutNetworks: ['TRC20', 'BEP20', 'ERC20', 'TON', 'POLYGON'],
     };

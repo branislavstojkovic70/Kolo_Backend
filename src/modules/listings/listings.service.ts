@@ -2,11 +2,13 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ListingStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { toFixed2 } from '../../common/money';
+import { AutoBuyService } from '../buy-requests/auto-buy.service';
 import { mapProduct, PRODUCT_SELECT } from '../products/products.service';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
@@ -28,6 +30,9 @@ const LISTING_SELECT = {
   quantity: true,
   soldCount: true,
   status: true,
+  // auto-buy reservation — null unless the listing is RESERVED
+  reservedUntil: true,
+  reservedForId: true,
   createdAt: true,
   updatedAt: true,
   seller: { select: { id: true, username: true, imageUrl: true } },
@@ -48,7 +53,12 @@ const ORDER_BY: Record<ListingSort, Prisma.ListingOrderByWithRelationInput> = {
 
 @Injectable()
 export class ListingsService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(ListingsService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly autoBuy: AutoBuyService,
+  ) {}
 
   /** search / category / price-range, shared by the public feed and "my listings". */
   private filters(q: QueryListingsDto): Prisma.ListingWhereInput {
@@ -209,11 +219,39 @@ export class ListingsService {
       },
       select: LISTING_SELECT,
     });
+
+    // Auto-buy: a standing wish may claim this listing the instant it exists.
+    // A matching failure must NEVER fail the seller's POST — worst case the
+    // cron's safety sweep picks the pair up a minute later.
+    try {
+      const matched = await this.autoBuy.tryMatchListing(listing.id);
+      if (matched) {
+        const reserved = await this.prisma.listing.findUnique({
+          where: { id: listing.id },
+          select: LISTING_SELECT,
+        });
+        if (reserved) return this.map(reserved);
+      }
+    } catch (e) {
+      this.logger.error(
+        `Auto-buy matching failed for new listing ${listing.id}: ${e?.message}`,
+        e?.stack,
+      );
+    }
+
     return this.map(listing);
   }
 
   async update(id: string, sellerId: string, dto: UpdateListingDto) {
     const current = await this.assertOwner(id, sellerId);
+
+    // While an auto-buy reservation holds the listing, its status belongs to the
+    // reservation lifecycle (paid → SOLD, lapsed → ACTIVE), not to the seller.
+    if (current.status === ListingStatus.RESERVED && dto.status !== undefined) {
+      throw new BadRequestException(
+        'This listing is reserved by an auto-buy order awaiting payment — its status cannot be changed until the reservation resolves.',
+      );
+    }
 
     // Restocking revives a sold-out listing; shrinking below what is already sold
     // is not a thing that can happen, so it is a 400 rather than a silent clamp.
@@ -257,7 +295,12 @@ export class ListingsService {
   }
 
   async remove(id: string, sellerId: string) {
-    await this.assertOwner(id, sellerId);
+    const current = await this.assertOwner(id, sellerId);
+    if (current.status === ListingStatus.RESERVED) {
+      throw new BadRequestException(
+        'This listing is reserved by an auto-buy order awaiting payment — wait for the reservation to resolve before deleting it.',
+      );
+    }
     await this.prisma.listing.update({
       where: { id },
       data: { status: ListingStatus.DELETED },

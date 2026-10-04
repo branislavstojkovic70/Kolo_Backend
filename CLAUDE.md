@@ -156,7 +156,8 @@ would return 400.
 
 ```prisma
 enum Role            { USER ADMIN }
-enum ListingStatus   { ACTIVE PAUSED DELETED }
+enum ListingStatus   { ACTIVE PAUSED SOLD_OUT RESERVED SOLD DELETED }
+enum BuyRequestStatus{ ACTIVE MATCHED FULFILLED CANCELLED EXPIRED }
 enum OrderStatus     { PENDING_PAYMENT PAID DISPUTED REFUNDED EXPIRED }
 enum DisputeStatus   { OPEN RESOLVED_BUYER RESOLVED_SELLER }
 enum WithdrawalStatus{ PENDING PROCESSING COMPLETED FAILED }
@@ -210,6 +211,9 @@ model Listing {
   // shown to the buyer only after payment (credentials, instructions, contact)
   deliveryInfo String?
   status      ListingStatus @default(ACTIVE)
+  // auto-buy reservation (status RESERVED): held for this buyer until this moment
+  reservedUntil DateTime?
+  reservedForId String?
   orders      Order[]
 
   @@index([status, createdAt])
@@ -290,6 +294,22 @@ model Withdrawal {
   orders   Order[]
 }
 
+// auto-buy: a standing wish "buy <product> at or below maxPriceUsd"
+model BuyRequest {
+  id          String           @id @default(cuid())
+  buyerId     String
+  buyer       User             @relation(fields: [buyerId], references: [id])
+  productId   String
+  product     Product          @relation(fields: [productId], references: [id])
+  maxPriceUsd Decimal          @db.Decimal(18, 2)
+  status      BuyRequestStatus @default(ACTIVE)
+  expiresAt   DateTime?        // optional, buyer-set
+  matchedListingId String?
+  matchedOrderId   String?
+  matchedAt        DateTime?
+  @@index([productId, status])
+}
+
 // idempotency guard for OxaPay callbacks
 model WebhookEvent {
   id        String   @id @default(cuid())
@@ -335,6 +355,7 @@ src/
     products/    products.module.ts products.controller.ts products.service.ts  # catalog, synced from prisma/products.json on boot
     listings/    listings.module.ts listings.controller.ts listings.service.ts dto/
     orders/      orders.module.ts  orders.controller.ts  orders.service.ts  dto/
+    buy-requests/ buy-requests.module.ts buy-requests.controller.ts buy-requests.service.ts auto-buy.service.ts dto/  # auto-buy
     stats/       stats.module.ts   stats.controller.ts   stats.service.ts   # buyer savings
     wallet/      wallet.module.ts  wallet.controller.ts  wallet.service.ts  dto/
     disputes/    disputes.module.ts disputes.controller.ts disputes.service.ts dto/
@@ -416,6 +437,42 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
 - `GET  /api/disputes/:id` (buyer, seller or admin) — includes `telegramInviteLink` for all three,
   so the FE can render a "Join dispute chat" button on the order view for **both** parties
 
+### Buy requests (auto-buy)
+
+A buyer registers a standing wish: "buy `<product>` the moment a listing appears at or below
+`maxPriceUsd`". Matching is **synchronous** (at listing creation and at request creation); a
+minute-cron (`@nestjs/schedule`, gated by `AUTO_BUY_ENABLED`) only cleans up expired
+reservations/requests and re-matches as a safety net. The buyer pays the OxaPay invoice
+themselves — there is **no** internal deposit balance.
+
+The flow on a match (all claims are conditional `updateMany`s — a lost race aborts cleanly):
+
+1. Listing `ACTIVE → RESERVED` (+1 unit claimed), `reservedForId` = buyer,
+   `reservedUntil = now + AUTO_BUY_RESERVATION_MINUTES` (default 15).
+2. Order created through the **same** shared path as `POST /api/orders`
+   (`OrdersService.createPendingOrderRow` + `attachInvoice`) — same fee, same snapshots.
+3. BuyRequest `ACTIVE → MATCHED` with `matchedListingId` / `matchedOrderId` / `matchedAt`.
+4. Invoice failure rolls the match back (listing + request `ACTIVE` again, order stays
+   `PENDING_PAYMENT` with null trackId). A listing is never left stuck in `RESERVED`.
+5. Paid webhook → `AutoBuyService.onOrderPaid` (the one hook): request `FULFILLED`,
+   listing `SOLD`, reservation cleared. Unpaid past `reservedUntil` → cron: order `EXPIRED`,
+   listing back to `ACTIVE`, request back to `ACTIVE`, then matching re-runs immediately.
+
+A `RESERVED` listing is invisible in the public feed, rejected by `POST /api/orders` (400),
+and its status/deletion are locked for the seller until the reservation resolves. It stays
+visible in `GET /api/listings/mine` with `reservedUntil` / `reservedForId`.
+
+- `POST   /api/buy-requests` → `{ productId, maxPriceUsd, expiresAt? }` — 400 unknown/inactive
+  product, 409 if the buyer already has an `ACTIVE` request for that product. Matches
+  immediately against existing listings (cheapest first) — the response may already be
+  `MATCHED` with the payment link.
+- `GET    /api/buy-requests/mine` → paginated, `?status=` filter; embeds `product` and, for
+  `MATCHED`, `matchedOrder { id, amountUsd, paymentUrl, status }`.
+- `GET    /api/buy-requests/:id` — owner or admin.
+- `DELETE /api/buy-requests/:id` — owner, only while `ACTIVE` → `CANCELLED`; 409 if `MATCHED`
+  (cancel by letting the reservation expire).
+- `GET    /api/admin/buy-requests` — AdminGuard, paginated, `?status=` filter.
+
 ### Stats
 - `GET /api/stats/savings` (authenticated — the caller's own savings as a buyer) →
   `{ totalSpentUsd, totalRetailUsd, totalSavedUsd, savedPercent, orderCount, items[] }`
@@ -442,7 +499,7 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
 ### Misc
 - `GET /api/health` **(public)**
 - `GET /api/config` **(public)** → `{ feePercent, vestingDays, disputeWindowDays, minWithdrawalUsd,
-  payoutCurrencies[], payoutNetworks[] }`
+  autoBuyReservationMinutes, payoutCurrencies[], payoutNetworks[] }`
   - Every platform rule the UI displays comes from here. The frontend is not allowed to keep its
     own copy of the fee or the vesting length — a changed env must change the UI, not lie in it.
 
@@ -626,6 +683,8 @@ TELEGRAM_BOT_TOKEN=xxx                   # bot that posts updates into the group
 TELEGRAM_BOT_USERNAME=my_escrow_bot
 TELEGRAM_ADMIN_USERNAMES=admin1,admin2   # added + promoted to admin in every dispute group
 
+AUTO_BUY_RESERVATION_MINUTES=15   # how long a matched listing is held while the buyer pays
+AUTO_BUY_ENABLED=true             # gates the auto-buy cleanup cron
 VESTING_DAYS=30
 DISPUTE_WINDOW_DAYS=30
 PLATFORM_FEE_PERCENT=5
@@ -731,7 +790,13 @@ clickable from `/docs` — hit **Authorize**, put the e-mail in the `dev-bypass`
    `POST /api/admin/disputes/dsp_open_1/resolve { "winner": "BUYER" }`. Refresh both wallets:
    the money left Elena's `disputed` bucket and appeared in Priya's `available` one,
    withdrawable right away. No OxaPay refund call — the buyer withdraws like a seller.
-10. **Numbers** — `GET /api/admin/stats` for the closing slide.
+10. **Auto-buy** — as Tom: `GET /api/buy-requests/mine` shows a `MATCHED` wish with a live
+    payment link (`ord_autobuy_1`, `lst_midjourney` is `RESERVED`) and an `ACTIVE` one for
+    Disney+. Pay the matched order at `/api/dev/mock-pay/ord_autobuy_1` → wish `FULFILLED`,
+    listing `SOLD`, Marcus's wallet fills like any sale. Or list Disney+ 12m under $100 as
+    any seller → an order + payment link appear for Tom automatically, the listing goes
+    `RESERVED`. Left unpaid, the minute-cron expires the reservation and re-arms everything.
+11. **Numbers** — `GET /api/admin/stats` for the closing slide.
 
 If Telegram is configured, step 8's group is created for the admins + bot, and step 9 posts
 the outcome into it. If it isn't, everything above still works; the invite link is `null`.

@@ -31,6 +31,15 @@ export default () => ({
       .filter(Boolean),
   },
 
+  autoBuy: {
+    reservationMinutes: parseInt(
+      process.env.AUTO_BUY_RESERVATION_MINUTES ?? '15',
+      10,
+    ),
+    // default true — only the literal string "false" turns the cron off
+    enabled: process.env.AUTO_BUY_ENABLED !== 'false',
+  },
+
   vestingDays: parseInt(process.env.VESTING_DAYS ?? '30', 10),
   disputeWindowDays: parseInt(process.env.DISPUTE_WINDOW_DAYS ?? '30', 10),
   platformFeePercent: parseFloat(process.env.PLATFORM_FEE_PERCENT ?? '5'),

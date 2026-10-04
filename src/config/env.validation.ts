@@ -99,6 +99,16 @@ class EnvironmentVariables {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(1)
+  AUTO_BUY_RESERVATION_MINUTES?: number;
+
+  @IsOptional()
+  @IsBooleanString()
+  AUTO_BUY_ENABLED?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
   @Min(0)
   VESTING_DAYS?: number;
 

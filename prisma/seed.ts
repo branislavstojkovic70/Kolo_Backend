@@ -18,6 +18,7 @@ import 'dotenv/config';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import {
+  BuyRequestStatus,
   DisputeStatus,
   ListingStatus,
   OrderStatus,
@@ -186,6 +187,20 @@ const LISTINGS = [
     createdDays: -11,
   },
   {
+    // auto-buy demo: RESERVED for Tom via breq_matched_1 / ord_autobuy_1
+    id: 'lst_midjourney',
+    product: 'midjourney-standard-1m',
+    seller: 'marcus' as UserKey,
+    description:
+      'One month of Midjourney Standard on a fresh account — 15h fast GPU time, relaxed mode unlimited. Credentials handed over, the account is yours.',
+    quantity: 1,
+    priceUsd: '19.00',
+    deliveryInfo:
+      'Account: demo-mj@example.com / Pw: MjDemo-2026 — change the password after first login.',
+    createdDays: 0,
+    reservedFor: 'tom' as UserKey,
+  },
+  {
     id: 'lst_adobe',
     product: 'adobe-cc-photography-3m',
     seller: 'priya' as UserKey,
@@ -319,6 +334,16 @@ const ORDERS: OrderSpec[] = [
     note: 'buyer won the dispute — withdrawable by the BUYER',
   },
   {
+    // the order breq_matched_1 produced — pay it at /api/dev/mock-pay/ord_autobuy_1
+    id: 'ord_autobuy_1',
+    listingId: 'lst_midjourney',
+    buyer: 'tom',
+    seller: 'marcus',
+    status: OrderStatus.PENDING_PAYMENT,
+    bucket: 'none',
+    note: 'AUTO-BUY match, listing reserved, awaiting payment',
+  },
+  {
     id: 'ord_withdrawn_1',
     listingId: 'lst_youtube',
     buyer: 'priya',
@@ -354,6 +379,7 @@ async function wipe() {
   }
   // FK-safe order: children first.
   await prisma.webhookEvent.deleteMany();
+  await prisma.buyRequest.deleteMany();
   await prisma.dispute.deleteMany();
   await prisma.order.deleteMany();
   await prisma.withdrawal.deleteMany();
@@ -421,6 +447,7 @@ async function main() {
   // --- listings ----------------------------------------------------------------
   for (const l of LISTINGS) {
     const product = products.get(l.product)!;
+    const reservedFor = 'reservedFor' in l ? l.reservedFor : undefined;
     await prisma.listing.create({
       data: {
         id: l.id,
@@ -435,11 +462,17 @@ async function main() {
         deliveryInfo: l.deliveryInfo,
         quantity: l.quantity,
         soldCount: soldOf(l.id),
-        // A listing whose units are all claimed is off the marketplace.
-        status:
-          soldOf(l.id) >= l.quantity
+        // A reserved listing is held for its auto-buy buyer; otherwise a listing
+        // whose units are all claimed is off the marketplace.
+        status: reservedFor
+          ? ListingStatus.RESERVED
+          : soldOf(l.id) >= l.quantity
             ? ListingStatus.SOLD_OUT
             : ListingStatus.ACTIVE,
+        reservedForId: reservedFor ? userIds[reservedFor] : null,
+        reservedUntil: reservedFor
+          ? new Date(T0 + 15 * 60_000) // fresh 15-minute payment window
+          : null,
         createdAt: days(l.createdDays),
         updatedAt: days(l.createdDays),
       },
@@ -545,6 +578,38 @@ async function main() {
     },
   });
 
+  // --- buy requests (auto-buy) --------------------------------------------------
+  // ACTIVE + unmatched: nobody lists Disney+, so it sits waiting. The moment a
+  // seller lists disney-plus-premium-12m at <= $100 it fires automatically.
+  await prisma.buyRequest.create({
+    data: {
+      id: 'breq_active_1',
+      buyerId: userIds.tom,
+      productId: products.get('disney-plus-premium-12m')!.id,
+      maxPriceUsd: new Prisma.Decimal('100.00'),
+      status: BuyRequestStatus.ACTIVE,
+      createdAt: days(-1),
+      updatedAt: days(-1),
+    },
+  });
+
+  // MATCHED with a live payment link: lst_midjourney is RESERVED for Tom and
+  // ord_autobuy_1 awaits payment at the mock checkout.
+  await prisma.buyRequest.create({
+    data: {
+      id: 'breq_matched_1',
+      buyerId: userIds.tom,
+      productId: products.get('midjourney-standard-1m')!.id,
+      maxPriceUsd: new Prisma.Decimal('20.00'),
+      status: BuyRequestStatus.MATCHED,
+      matchedListingId: 'lst_midjourney',
+      matchedOrderId: 'ord_autobuy_1',
+      matchedAt: new Date(T0),
+      createdAt: days(-2),
+      updatedAt: new Date(T0),
+    },
+  });
+
   printSummary(sellerAmounts, buyerAmounts, productOf);
 }
 
@@ -601,7 +666,7 @@ function printSummary(
     ` ${USERS.admin.username} <${USERS.admin.email}> is the ADMIN (from ADMIN_EMAILS).`,
   );
   out.push(
-    ` ${CATALOG.length} catalog products · ${LISTINGS.length} active listings · ${ORDERS.length} orders · 2 disputes · 1 completed withdrawal`,
+    ` ${CATALOG.length} catalog products · ${LISTINGS.length} listings · ${ORDERS.length} orders · 2 disputes · 2 buy requests · 1 completed withdrawal`,
   );
   out.push('');
   out.push(
@@ -671,6 +736,20 @@ function printSummary(
     '   Nothing sits in "withdrawing": that bucket fills the moment you call',
   );
   out.push('   POST /api/wallet/withdraw as Elena or Marcus during the demo.');
+  out.push('');
+  out.push(' AUTO-BUY (as tom.becker@example.com)');
+  out.push(
+    '   breq_active_1   ACTIVE   Disney+ 12m @ ≤ $100 — list that product cheap and it fires',
+  );
+  out.push(
+    '   breq_matched_1  MATCHED  Midjourney @ ≤ $20 → ord_autobuy_1, lst_midjourney RESERVED for 15 min',
+  );
+  out.push(
+    `   Pay the matched order: ${PUBLIC_API_URL}/api/dev/mock-pay/ord_autobuy_1`,
+  );
+  out.push(
+    '   (unpaid, the cron expires it after 15 min, relists the listing and re-arms the wish)',
+  );
   out.push('');
   out.push(
     `   Pay an open invoice: ${PUBLIC_API_URL}/api/dev/mock-pay/ord_pending_1`,

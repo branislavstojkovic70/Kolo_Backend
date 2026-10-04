@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   ListingStatus,
@@ -8,6 +8,7 @@ import {
 } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { AutoBuyService } from '../buy-requests/auto-buy.service';
 
 @Injectable()
 export class WebhooksService {
@@ -16,6 +17,8 @@ export class WebhooksService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    @Inject(forwardRef(() => AutoBuyService))
+    private readonly autoBuy: AutoBuyService,
   ) {}
 
   /** hmac_sha512(rawBody, key), constant-time compared. Never throws on length mismatch. */
@@ -115,6 +118,18 @@ export class WebhooksService {
       this.logger.log(
         `Order ${order.id} PAID. paidAt=${paidAt.toISOString()} vestedAt=${vestedAt.toISOString()} (VESTING_DAYS=${vestingDays})`,
       );
+
+      // Auto-buy hook: a paid order that fulfils a BuyRequest marks it FULFILLED
+      // and the listing SOLD. Manual purchases fall straight through, and a
+      // failure here must never break the webhook's 200.
+      try {
+        await this.autoBuy.onOrderPaid(order);
+      } catch (e) {
+        this.logger.error(
+          `AutoBuy onOrderPaid failed for order ${order.id}: ${e?.message}`,
+          e?.stack,
+        );
+      }
       return;
     }
 
