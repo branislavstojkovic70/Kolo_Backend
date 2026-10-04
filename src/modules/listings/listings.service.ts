@@ -7,6 +7,7 @@ import {
 import { ListingStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { toFixed2 } from '../../common/money';
+import { mapProduct, PRODUCT_SELECT } from '../products/products.service';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
 import { ListingSort, QueryListingsDto } from './dto/query-listings.dto';
@@ -18,6 +19,7 @@ import { ListingSort, QueryListingsDto } from './dto/query-listings.dto';
 const LISTING_SELECT = {
   id: true,
   sellerId: true,
+  productId: true,
   title: true,
   description: true,
   category: true,
@@ -29,6 +31,8 @@ const LISTING_SELECT = {
   createdAt: true,
   updatedAt: true,
   seller: { select: { id: true, username: true, imageUrl: true } },
+  // so the FE can strike through the official price next to the seller's price
+  product: { select: PRODUCT_SELECT },
 } satisfies Prisma.ListingSelect;
 
 type SelectedListing = Prisma.ListingGetPayload<{
@@ -67,7 +71,11 @@ export class ListingsService {
   }
 
   private map(l: SelectedListing) {
-    return { ...l, priceUsd: toFixed2(l.priceUsd) };
+    return {
+      ...l,
+      priceUsd: toFixed2(l.priceUsd),
+      product: mapProduct(l.product),
+    };
   }
 
   async findPublic(q: QueryListingsDto) {
@@ -169,13 +177,32 @@ export class ListingsService {
   }
 
   async create(sellerId: string, dto: CreateListingDto) {
+    // Only catalog products can be listed. title/category are copied from the
+    // product so every existing read keeps its exact shape.
+    const product = await this.prisma.product.findUnique({
+      where: { id: dto.productId },
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        imageUrl: true,
+        active: true,
+      },
+    });
+    if (!product || !product.active) {
+      throw new BadRequestException(
+        'Unknown product — pick one from GET /api/products',
+      );
+    }
+
     const listing = await this.prisma.listing.create({
       data: {
         sellerId,
-        title: dto.title,
+        productId: product.id,
+        title: product.name,
+        category: product.category,
         description: dto.description,
-        category: dto.category,
-        imageUrl: dto.imageUrl,
+        imageUrl: dto.imageUrl ?? product.imageUrl,
         priceUsd: new Prisma.Decimal(dto.priceUsd).toFixed(2),
         deliveryInfo: dto.deliveryInfo,
         quantity: dto.quantity ?? 1,
@@ -210,12 +237,12 @@ export class ListingsService {
           ? ListingStatus.ACTIVE
           : requested;
 
+    // productId, title and category are deliberately not updatable — the product
+    // is fixed at creation and title/category always mirror it.
     const listing = await this.prisma.listing.update({
       where: { id },
       data: {
-        title: dto.title,
         description: dto.description,
-        category: dto.category,
         imageUrl: dto.imageUrl,
         deliveryInfo: dto.deliveryInfo,
         status,

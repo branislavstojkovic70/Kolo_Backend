@@ -9,6 +9,8 @@ import { HealthModule } from './modules/health/health.module';
 import { PlatformConfigModule } from './modules/config/config.module';
 import { UsersModule } from './modules/users/users.module';
 import { ListingsModule } from './modules/listings/listings.module';
+import { ProductsModule } from './modules/products/products.module';
+import { StatsModule } from './modules/stats/stats.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { WalletModule } from './modules/wallet/wallet.module';
@@ -28,8 +30,10 @@ import { DevModule } from './modules/dev/dev.module';
     HealthModule,
     PlatformConfigModule,
     UsersModule,
+    ProductsModule,
     ListingsModule,
     OrdersModule,
+    StatsModule,
     PaymentsModule,
     WalletModule,
     TelegramModule,

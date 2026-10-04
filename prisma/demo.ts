@@ -17,6 +17,8 @@
  * applies to orders paid live through the webhook during the demo.
  */
 import 'dotenv/config';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import {
   DisputeStatus,
   ListingStatus,
@@ -29,6 +31,21 @@ import {
 import { calcFee, sum, toFixed2 } from '../src/common/money';
 
 const prisma = new PrismaClient();
+
+/** The product catalog — same file ProductsService syncs on every boot. */
+const CATALOG: {
+  slug: string;
+  name: string;
+  category: string;
+  retailPriceUsd: string;
+  imageUrl?: string;
+}[] = JSON.parse(readFileSync(join(__dirname, 'products.json'), 'utf8')) as {
+  slug: string;
+  name: string;
+  category: string;
+  retailPriceUsd: string;
+  imageUrl?: string;
+}[];
 
 const DAY = 24 * 60 * 60 * 1000;
 const T0 = Date.now();
@@ -74,6 +91,8 @@ type UserKey = keyof typeof USERS;
 interface ListingSpec {
   id: string;
   seller: UserKey;
+  /** catalog slug — title/category are copied from this product at create time */
+  product: string;
   title: string;
   description: string;
   category: string;
@@ -88,6 +107,7 @@ interface ListingSpec {
 const LISTINGS: ListingSpec[] = [
   {
     id: 'lst_youtube',
+    product: 'youtube-premium-12m',
     seller: 'bane',
     title: 'YouTube Premium — 12 months on your own account',
     description:
@@ -102,6 +122,7 @@ const LISTINGS: ListingSpec[] = [
   },
   {
     id: 'lst_spotify',
+    product: 'spotify-premium-6m',
     seller: 'bane',
     title: 'Spotify Premium Individual — 6 months',
     description:
@@ -116,13 +137,14 @@ const LISTINGS: ListingSpec[] = [
   },
   {
     id: 'lst_chatgpt',
+    product: 'chatgpt-plus-1m',
     seller: 'bane',
     title: 'ChatGPT Plus — 1 month on your account',
     description:
       'One month of ChatGPT Plus applied to your own OpenAI account. Priority access at peak hours, faster responses, all the latest models.',
     category: 'AI Tools',
     quantity: 6,
-    priceUsd: '21.00',
+    priceUsd: '14.00',
     deliveryInfo:
       'Send the e-mail on your OpenAI account. The upgrade is applied within the hour and I send you a confirmation screenshot.',
     imageUrl: 'https://picsum.photos/seed/kolo-chatgpt/800/500',
@@ -130,6 +152,7 @@ const LISTINGS: ListingSpec[] = [
   },
   {
     id: 'lst_nordvpn',
+    product: 'nordvpn-24m',
     seller: 'bane',
     title: 'NordVPN — 2 year plan, fresh account',
     description:
@@ -144,6 +167,7 @@ const LISTINGS: ListingSpec[] = [
   },
   {
     id: 'lst_canva',
+    product: 'canva-pro-12m',
     seller: 'bane',
     title: 'Canva Pro — 1 year, your own account',
     description:
@@ -158,6 +182,7 @@ const LISTINGS: ListingSpec[] = [
   },
   {
     id: 'lst_netflix',
+    product: 'netflix-premium-3m',
     seller: 'stojkovic',
     title: 'Netflix Premium 4K — 3 months (private profile)',
     description:
@@ -172,6 +197,7 @@ const LISTINGS: ListingSpec[] = [
   },
   {
     id: 'lst_notion',
+    product: 'notion-plus-12m',
     seller: 'stojkovic',
     title: 'Notion Plus — 1 year for your workspace',
     description:
@@ -186,6 +212,7 @@ const LISTINGS: ListingSpec[] = [
   },
   {
     id: 'lst_adobe',
+    product: 'adobe-cc-photography-3m',
     seller: 'stojkovic',
     title: 'Adobe Creative Cloud Photography — 3 months',
     description:
@@ -200,6 +227,7 @@ const LISTINGS: ListingSpec[] = [
   },
   {
     id: 'lst_office',
+    product: 'microsoft-365-personal-12m',
     seller: 'uros',
     title: 'Microsoft 365 Family — 12 months, your own seat',
     description:
@@ -218,12 +246,7 @@ const LISTINGS: ListingSpec[] = [
 
 /** The wallet bucket the order is expected to land in — used for the printed summary. */
 type Bucket =
-  | 'available'
-  | 'vesting'
-  | 'disputed'
-  | 'withdrawing'
-  | 'withdrawn'
-  | 'none';
+  'available' | 'vesting' | 'disputed' | 'withdrawing' | 'withdrawn' | 'none';
 
 interface OrderSpec {
   id: string;
@@ -422,13 +445,48 @@ async function wipe() {
   await prisma.withdrawal.deleteMany();
   await prisma.listing.deleteMany();
   // Only the seed.ts cast — the four real accounts are kept and updated in place.
-  await prisma.user.deleteMany({ where: { email: { endsWith: '@example.com' } } });
+  await prisma.user.deleteMany({
+    where: { email: { endsWith: '@example.com' } },
+  });
 }
 
 // -------------------------------------------------------------------------- main
 
 async function main() {
   await wipe();
+
+  // --- products: same upsert-by-slug the app runs on boot -----------------------
+  const products = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      category: string;
+      imageUrl: string | null;
+      retail: Prisma.Decimal;
+    }
+  >();
+  for (const p of CATALOG) {
+    const data = {
+      name: p.name,
+      category: p.category,
+      retailPriceUsd: new Prisma.Decimal(p.retailPriceUsd),
+      imageUrl: p.imageUrl ?? null,
+      active: true,
+    };
+    const created = await prisma.product.upsert({
+      where: { slug: p.slug },
+      create: { slug: p.slug, ...data },
+      update: data,
+    });
+    products.set(p.slug, {
+      id: created.id,
+      name: created.name,
+      category: created.category,
+      imageUrl: created.imageUrl,
+      retail: created.retailPriceUsd,
+    });
+  }
 
   // --- users: match on e-mail so a real clerkUserId is never overwritten -------
   const userIds = {} as Record<UserKey, string>;
@@ -468,13 +526,16 @@ async function main() {
 
   // --- listings ---------------------------------------------------------------
   for (const l of LISTINGS) {
+    const product = products.get(l.product)!;
     await prisma.listing.create({
       data: {
         id: l.id,
         sellerId: userIds[l.seller],
-        title: l.title,
+        // title/category are copied from the catalog product, like POST /api/listings
+        productId: product.id,
+        title: product.name,
+        category: product.category,
         description: l.description,
-        category: l.category,
         imageUrl: l.imageUrl,
         priceUsd: new Prisma.Decimal(l.priceUsd),
         deliveryInfo: l.deliveryInfo,
@@ -491,7 +552,12 @@ async function main() {
     });
   }
   const priceOf = new Map(LISTINGS.map((l) => [l.id, l.priceUsd]));
-  const titleOf = new Map(LISTINGS.map((l) => [l.id, l.title]));
+  const productOf = new Map(
+    LISTINGS.map((l) => [l.id, products.get(l.product)!]),
+  );
+  const titleOf = new Map(
+    LISTINGS.map((l) => [l.id, products.get(l.product)!.name]),
+  );
 
   // --- withdrawal, created before the order that links to it ------------------
   const withdrawn = ORDERS.find((o) => o.id === 'ord_withdrawn_1')!;
@@ -534,6 +600,9 @@ async function main() {
         buyerId: userIds[o.buyer],
         sellerId: userIds[o.seller],
         titleSnapshot: titleOf.get(o.listingId)!,
+        // retail price frozen at "purchase" time — feeds GET /api/stats/savings
+        productId: productOf.get(o.listingId)!.id,
+        retailPriceUsdSnapshot: productOf.get(o.listingId)!.retail,
         amountUsd,
         feeUsd,
         sellerAmountUsd,

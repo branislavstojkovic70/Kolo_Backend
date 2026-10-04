@@ -21,6 +21,8 @@ const ORDER_SELECT = {
   buyerId: true,
   sellerId: true,
   titleSnapshot: true,
+  productId: true,
+  retailPriceUsdSnapshot: true,
   amountUsd: true,
   feeUsd: true,
   sellerAmountUsd: true,
@@ -62,6 +64,7 @@ export class OrdersService {
       amountUsd: toFixed2(o.amountUsd),
       feeUsd: toFixed2(o.feeUsd),
       sellerAmountUsd: toFixed2(o.sellerAmountUsd),
+      retailPriceUsdSnapshot: toFixed2(o.retailPriceUsdSnapshot),
     };
   }
 
@@ -74,6 +77,8 @@ export class OrdersService {
         title: true,
         priceUsd: true,
         status: true,
+        productId: true,
+        product: { select: { retailPriceUsd: true } },
       },
     });
 
@@ -112,6 +117,9 @@ export class OrdersService {
         buyerId,
         sellerId: listing.sellerId,
         titleSnapshot: listing.title,
+        // retail price frozen NOW — savings are never recomputed from the live catalog
+        productId: listing.productId,
+        retailPriceUsdSnapshot: listing.product.retailPriceUsd,
         amountUsd,
         feeUsd,
         sellerAmountUsd,

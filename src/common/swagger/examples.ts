@@ -29,10 +29,32 @@ export const ME = {
   createdAt: '2026-06-21T09:00:00.000Z',
 };
 
+export const PRODUCT = {
+  id: 'cmf3prod0001q1x8youtube12',
+  slug: 'youtube-premium-12m',
+  name: 'YouTube Premium — 12 months',
+  category: 'Streaming',
+  retailPriceUsd: '139.99',
+  imageUrl: 'https://picsum.photos/seed/kolo-youtube/800/500',
+};
+
+export const PRODUCT_LIST = [
+  PRODUCT,
+  {
+    id: 'cmf3prod0002q1x8chatgpt1m',
+    slug: 'chatgpt-plus-1m',
+    name: 'ChatGPT Plus — 1 month',
+    category: 'AI Tools',
+    retailPriceUsd: '20.00',
+    imageUrl: 'https://picsum.photos/seed/kolo-chatgpt/800/500',
+  },
+];
+
 export const LISTING = {
   id: 'lst_youtube',
   sellerId: USER_STUB.id,
-  title: 'YouTube Premium — 12 months on your own account',
+  productId: PRODUCT.id,
+  title: 'YouTube Premium — 12 months',
   description: 'Family-plan invite for the Google account you already use…',
   category: 'Streaming',
   imageUrl: 'https://images.example.com/youtube-premium.jpg',
@@ -41,6 +63,7 @@ export const LISTING = {
   createdAt: '2026-06-29T09:00:00.000Z',
   updatedAt: '2026-06-29T09:00:00.000Z',
   seller: USER_STUB,
+  product: PRODUCT,
 };
 
 export const LISTING_STATS = {
@@ -71,7 +94,9 @@ export const ORDER = {
   listingId: 'lst_youtube',
   buyerId: 'cmf3k1a2b0004q1x8p2c7h1k9',
   sellerId: USER_STUB.id,
-  titleSnapshot: 'YouTube Premium — 12 months on your own account',
+  titleSnapshot: 'YouTube Premium — 12 months',
+  productId: PRODUCT.id,
+  retailPriceUsdSnapshot: '139.99',
   amountUsd: '24.99',
   feeUsd: '1.25',
   sellerAmountUsd: '23.74',
@@ -306,7 +331,35 @@ export const ADMIN_STATS = {
     platformFeesUsd: '10.25',
     inEscrowUsd: '146.28',
     paidOutUsd: '23.74',
+    buyerRetailUsd: '678.56',
+    buyerSavedUsd: '497.58',
   },
+};
+
+export const SAVINGS = {
+  totalSpentUsd: '66.49',
+  totalRetailUsd: '231.93',
+  totalSavedUsd: '165.44',
+  savedPercent: '71.33',
+  orderCount: 3,
+  items: [
+    {
+      orderId: 'ord_vesting_1',
+      productName: 'YouTube Premium — 12 months',
+      paidUsd: '24.99',
+      retailUsd: '139.99',
+      savedUsd: '115.00',
+      purchasedAt: '2026-08-28T09:12:44.000Z',
+    },
+    {
+      orderId: 'ord_available_1',
+      productName: 'Spotify Premium Individual — 6 months',
+      paidUsd: '17.50',
+      retailUsd: '71.94',
+      savedUsd: '54.44',
+      purchasedAt: '2026-08-16T10:00:00.000Z',
+    },
+  ],
 };
 
 export const HEALTH = { status: 'ok', db: 'up' };

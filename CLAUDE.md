@@ -161,6 +161,22 @@ enum OrderStatus     { PENDING_PAYMENT PAID DISPUTED REFUNDED EXPIRED }
 enum DisputeStatus   { OPEN RESOLVED_BUYER RESOLVED_SELLER }
 enum WithdrawalStatus{ PENDING PROCESSING COMPLETED FAILED }
 
+// The predefined product catalog. Sellers can ONLY list products that exist here —
+// no more free-text titles. Source of truth is prisma/products.json, upserted by slug
+// on every boot (ProductsService.onModuleInit) — idempotent, price/name changes update
+// the row in place, never duplicate.
+model Product {
+  id             String  @id @default(cuid())
+  slug           String  @unique
+  name           String
+  category       String
+  retailPriceUsd Decimal @db.Decimal(18, 2)   // official/regular price
+  imageUrl       String?
+  active         Boolean @default(true)
+  listings       Listing[]
+  orders         Order[]
+}
+
 model User {
   id               String  @id @default(cuid())
   clerkUserId      String  @unique          // subject from the Clerk JWT
@@ -184,9 +200,11 @@ model Listing {
   id          String        @id @default(cuid())
   sellerId    String
   seller      User          @relation(fields: [sellerId], references: [id])
-  title       String
+  productId   String        // REQUIRED — the catalog product; immutable after creation
+  product     Product       @relation(fields: [productId], references: [id])
+  title       String        // COPIED from product.name at write time (keeps old response shapes)
   description String
-  category    String?       // free text, no separate table
+  category    String?       // COPIED from product.category at write time
   imageUrl    String?       // external cover-image URL; we store the link only
   priceUsd    Decimal       @db.Decimal(18, 2)
   // shown to the buyer only after payment (credentials, instructions, contact)
@@ -209,6 +227,11 @@ model Order {
 
   // snapshot at purchase time — listing may change later
   titleSnapshot   String
+  // catalog product + retail price frozen AT PURCHASE TIME. Buyer savings are
+  // always computed from this snapshot, never from the live catalog.
+  productId              String
+  product                Product @relation(fields: [productId], references: [id])
+  retailPriceUsdSnapshot Decimal @db.Decimal(18, 2)
   amountUsd       Decimal @db.Decimal(18, 2)  // what the buyer pays
   feeUsd          Decimal @db.Decimal(18, 2)  // platform fee
   sellerAmountUsd Decimal @db.Decimal(18, 2)  // amount - fee = escrowed amount
@@ -309,8 +332,10 @@ src/
     money.ts                     # Decimal helpers: sum(), toFixed2(), calcFee()
   modules/
     users/       users.module.ts   users.controller.ts   users.service.ts   dto/
+    products/    products.module.ts products.controller.ts products.service.ts  # catalog, synced from prisma/products.json on boot
     listings/    listings.module.ts listings.controller.ts listings.service.ts dto/
     orders/      orders.module.ts  orders.controller.ts  orders.service.ts  dto/
+    stats/       stats.module.ts   stats.controller.ts   stats.service.ts   # buyer savings
     wallet/      wallet.module.ts  wallet.controller.ts  wallet.service.ts  dto/
     disputes/    disputes.module.ts disputes.controller.ts disputes.service.ts dto/
     admin/       admin.module.ts   admin.controller.ts   admin.service.ts   dto/
@@ -334,6 +359,12 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
 - `GET  /api/me` → current user (auto-created on first authenticated request)
 - `PATCH /api/me` → `{ username?, telegramUsername? }`
 
+### Products
+- `GET /api/products` **(public)** → the active catalog, sorted by category then name.
+  Feeds the "create listing" dropdown; `retailPriceUsd` is the official price the FE
+  strikes through next to the seller's price. The catalog lives in `prisma/products.json`
+  and is upserted by slug on every boot — edit the file, restart, done. No write API.
+
 ### Listings
 - `GET  /api/listings` **(public)** → `?search=&category=&minPrice=&maxPrice=&sort=&page=&limit=`
   — only `ACTIVE`, **never** returns `deliveryInfo`. `sort` is
@@ -342,17 +373,26 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
   — counted over every `ACTIVE` listing in SQL. The FE must not average a page of results instead.
 - `GET  /api/listings/:id` **(public)** — no `deliveryInfo`
 - `GET  /api/listings/mine` → same filters as the public feed, paginated (includes `PAUSED`)
-- `POST /api/listings` → `{ title, description, category?, imageUrl?, priceUsd, deliveryInfo? }`
-  - `imageUrl` is a plain external http(s) link (validated, max 2048 chars). We store the link and
-    nothing else — no uploads, no hosting, no resizing.
-- `PATCH /api/listings/:id` (owner only)
+- `POST /api/listings` → `{ productId, description, imageUrl?, priceUsd, quantity?, deliveryInfo? }`
+  - `productId` must be an **active catalog product** — unknown or inactive → 400.
+    `title` and `category` are copied from the product at write time; they are no longer
+    user input, but the columns stay populated so every read keeps its old shape.
+  - `imageUrl` is a plain external http(s) link (validated, max 2048 chars); defaults to the
+    product image. We store the link and nothing else — no uploads, no hosting, no resizing.
+- `PATCH /api/listings/:id` (owner only) — may change `description`, `priceUsd`,
+  `deliveryInfo` (plus `imageUrl` / `quantity` / `status`) — **never** `productId`.
 - `DELETE /api/listings/:id` (owner only → status `DELETED`)
+- Every listing read also embeds `product`
+  `{ id, slug, name, category, retailPriceUsd, imageUrl }` for the struck-through retail price.
 
 ### Orders
 - `POST /api/orders` → `{ listingId }`
   - reject if buyer === seller, or listing not `ACTIVE`
   - compute fee, create order `PENDING_PAYMENT`, call OxaPay invoice, store
     `oxapayTrackId` + `paymentUrl`, return `{ order, paymentUrl }`
+  - copies `productId` from the listing and snapshots `retailPriceUsdSnapshot` from the
+    product **at purchase time** — savings are never recomputed from the live catalog.
+  - every order read now also returns `productId` + `retailPriceUsdSnapshot` (string).
 - `GET  /api/orders` → `?role=all|buying|selling&search=&status=&page=&limit=` → `Page<Order>`
   - The list the FE uses. Two separately paginated lists cannot be merged into one page, so the
     combined "all my orders" view needs its own query.
@@ -376,13 +416,24 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
 - `GET  /api/disputes/:id` (buyer, seller or admin) — includes `telegramInviteLink` for all three,
   so the FE can render a "Join dispute chat" button on the order view for **both** parties
 
+### Stats
+- `GET /api/stats/savings` (authenticated — the caller's own savings as a buyer) →
+  `{ totalSpentUsd, totalRetailUsd, totalSavedUsd, savedPercent, orderCount, items[] }`
+  with `items: [{ orderId, productName, paidUsd, retailUsd, savedUsd, purchasedAt }]`.
+  - Counts only orders the buyer got value from: status `PAID` or `DISPUTED`.
+    `REFUNDED` is **excluded** (money came back — not a saving), as are
+    `PENDING_PAYMENT` and `EXPIRED`.
+  - `savedUsd = retailPriceUsdSnapshot - amountUsd` per order, `Prisma.Decimal` only.
+    `savedPercent` is a 2-decimal string; `0.00` when `totalRetailUsd` is 0.
+
 ### Admin (`AdminGuard`)
 - `GET  /api/admin/disputes?status=OPEN`
 - `POST /api/admin/disputes/:id/resolve` → `{ winner: "BUYER" | "SELLER", note? }`
 - `POST /api/admin/disputes/:id/telegram-retry` — re-run group creation if Telegram failed
 - `GET  /api/admin/orders`
 - `GET  /api/admin/withdrawals`
-- `GET  /api/admin/stats` → counts + volume (nice for the demo)
+- `GET  /api/admin/stats` → counts + volume (nice for the demo). `money` also carries
+  `buyerRetailUsd` / `buyerSavedUsd` — platform-wide buyer savings vs. the retail snapshots.
 
 ### Webhooks (public, raw body)
 - `POST /api/webhooks/oxapay/payment`
@@ -615,6 +666,10 @@ npm run start:dev
 `prisma db seed` is destructive and idempotent on purpose — run it as often as you like,
 you always get the same data. It prints a table of every user's balance buckets plus a
 cheat sheet of which account to log in as. Read that table before you present.
+
+Every seeded listing/order is tied to a catalog Product at a discount off retail; the seed
+also prints a **BUYER SAVINGS** line per buyer that `GET /api/stats/savings` must match —
+Tom and Priya are your savings demo accounts from the first second.
 
 Seeded accounts (`x-dev-user-email` values):
 

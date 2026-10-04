@@ -14,11 +14,15 @@ import {
 } from 'class-validator';
 
 export class CreateListingDto {
-  @ApiProperty({ example: 'YouTube Premium — 12 months' })
+  @ApiProperty({
+    example: 'cmf3prod0001q1x8youtube12',
+    description:
+      'Id of a catalog product (GET /api/products). The listing title and ' +
+      'category are copied from it — they are not free text anymore.',
+  })
   @IsString()
-  @MinLength(3)
-  @MaxLength(140)
-  title: string;
+  @MinLength(1)
+  productId: string;
 
   @ApiProperty({ example: 'Invite-based upgrade of your own Google account.' })
   @IsString()
@@ -26,17 +30,12 @@ export class CreateListingDto {
   @MaxLength(4000)
   description: string;
 
-  @ApiPropertyOptional({ example: 'Streaming' })
-  @IsOptional()
-  @IsString()
-  @MaxLength(60)
-  category?: string;
-
   @ApiPropertyOptional({
     example: 'https://images.example.com/youtube-premium.jpg',
     description:
       'Cover image URL shown on the marketplace card and the detail page. ' +
-      'We only store the link — nothing is uploaded or hosted here.',
+      'Defaults to the product image. We only store the link — nothing is ' +
+      'uploaded or hosted here.',
   })
   @IsOptional()
   @IsUrl({ protocols: ['http', 'https'], require_protocol: true })

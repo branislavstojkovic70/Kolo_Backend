@@ -9,8 +9,14 @@
  * paidAt / vestedAt are written DIRECTLY here so the vesting spread is visible in the
  * UI immediately — nobody has to wait 30 days. VESTING_DAYS only affects orders that
  * get paid live through the webhook; it is deliberately not applied to seeded rows.
+ *
+ * Every listing and order is tied to a catalog Product (prisma/products.json) at a
+ * sensible discount off retail, and every paid order snapshots the retail price so
+ * GET /api/stats/savings has data from the first boot.
  */
 import 'dotenv/config';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import {
   DisputeStatus,
   ListingStatus,
@@ -34,6 +40,21 @@ const PUBLIC_API_URL = process.env.PUBLIC_API_URL ?? 'http://localhost:3000';
 const ADMIN_EMAIL =
   (process.env.ADMIN_EMAILS ?? '').split(',')[0]?.trim().toLowerCase() ||
   'admin@marketplace.dev';
+
+// --------------------------------------------------------------------- catalog
+
+interface CatalogEntry {
+  slug: string;
+  name: string;
+  category: string;
+  retailPriceUsd: string;
+  imageUrl?: string;
+}
+
+/** Same file ProductsService syncs on boot — the one source of catalog truth. */
+const CATALOG = JSON.parse(
+  readFileSync(join(__dirname, 'products.json'), 'utf8'),
+) as CatalogEntry[];
 
 // ---------------------------------------------------------------------------- users
 
@@ -75,15 +96,17 @@ type UserKey = keyof typeof USERS;
 
 // ------------------------------------------------------------------------- listings
 
+/**
+ * title / category / imageUrl are no longer authored here — they come from the
+ * catalog product, exactly like POST /api/listings copies them at write time.
+ */
 const LISTINGS = [
   {
     id: 'lst_youtube',
-    imageUrl: 'https://picsum.photos/seed/kolo-youtube/800/500',
+    product: 'youtube-premium-12m',
     seller: 'elena' as UserKey,
-    title: 'YouTube Premium — 12 months on your own account',
     description:
       'Family-plan invite for the Google account you already use. Ad-free video, background play and YouTube Music for a full year. No password sharing, nothing to install, works worldwide.',
-    category: 'Streaming',
     quantity: 5,
     priceUsd: '24.99',
     deliveryInfo:
@@ -92,12 +115,10 @@ const LISTINGS = [
   },
   {
     id: 'lst_spotify',
-    imageUrl: 'https://picsum.photos/seed/kolo-spotify/800/500',
+    product: 'spotify-premium-6m',
     seller: 'elena' as UserKey,
-    title: 'Spotify Premium Individual — 6 months',
     description:
       'Six prepaid months of Spotify Premium on your existing account. Your playlists, follows and listening history all stay exactly where they are.',
-    category: 'Streaming',
     quantity: 4,
     priceUsd: '17.50',
     deliveryInfo:
@@ -106,12 +127,10 @@ const LISTINGS = [
   },
   {
     id: 'lst_canva',
-    imageUrl: 'https://picsum.photos/seed/kolo-canva/800/500',
+    product: 'canva-pro-12m',
     seller: 'elena' as UserKey,
-    title: 'Canva Pro — 1 year, your own account',
     description:
       'Canva Pro added to your own login for 12 months: 100M+ premium assets, Brand Kit, Magic Resize and the background remover.',
-    category: 'Design',
     quantity: 3,
     priceUsd: '9.00',
     deliveryInfo:
@@ -120,26 +139,22 @@ const LISTINGS = [
   },
   {
     id: 'lst_chatgpt',
-    imageUrl: 'https://picsum.photos/seed/kolo-chatgpt/800/500',
+    product: 'chatgpt-plus-1m',
     seller: 'marcus' as UserKey,
-    title: 'ChatGPT Plus — 1 month on your account',
     description:
       'One month of ChatGPT Plus applied to your own OpenAI account. Priority access at peak hours, faster responses, all the latest models.',
-    category: 'AI Tools',
     quantity: 6,
-    priceUsd: '21.00',
+    priceUsd: '14.00',
     deliveryInfo:
       'Send the e-mail on your OpenAI account. The upgrade is applied within the hour and I send you a confirmation screenshot.',
     createdDays: -27,
   },
   {
     id: 'lst_netflix',
-    imageUrl: 'https://picsum.photos/seed/kolo-netflix/800/500',
+    product: 'netflix-premium-3m',
     seller: 'marcus' as UserKey,
-    title: 'Netflix Premium 4K — 3 months (private profile)',
     description:
       'Your own profile on a Premium 4K household for three months. Ultra HD, four streams, downloads enabled. The profile PIN is yours alone.',
-    category: 'Streaming',
     quantity: 4,
     priceUsd: '32.00',
     deliveryInfo:
@@ -148,12 +163,10 @@ const LISTINGS = [
   },
   {
     id: 'lst_nordvpn',
-    imageUrl: 'https://picsum.photos/seed/kolo-nordvpn/800/500',
+    product: 'nordvpn-24m',
     seller: 'marcus' as UserKey,
-    title: 'NordVPN — 2 year plan, fresh account',
     description:
       'Brand-new NordVPN account with 24 months prepaid. Six devices, Threat Protection, dedicated support. The credentials are yours to change on day one.',
-    category: 'Privacy & Security',
     quantity: 1,
     priceUsd: '54.00',
     deliveryInfo:
@@ -162,12 +175,10 @@ const LISTINGS = [
   },
   {
     id: 'lst_notion',
-    imageUrl: 'https://picsum.photos/seed/kolo-notion/800/500',
+    product: 'notion-plus-12m',
     seller: 'priya' as UserKey,
-    title: 'Notion Plus — 1 year for your workspace',
     description:
       'Notion Plus applied to your existing personal workspace for 12 months: unlimited blocks, 30-day version history, 100 guests.',
-    category: 'Productivity',
     quantity: 3,
     priceUsd: '44.00',
     deliveryInfo:
@@ -176,12 +187,10 @@ const LISTINGS = [
   },
   {
     id: 'lst_adobe',
-    imageUrl: 'https://picsum.photos/seed/kolo-adobe/800/500',
+    product: 'adobe-cc-photography-3m',
     seller: 'priya' as UserKey,
-    title: 'Adobe Creative Cloud Photography — 3 months',
     description:
       'Lightroom + Photoshop with 20 GB of cloud storage, three months prepaid on your own Adobe ID. Desktop and mobile both included.',
-    category: 'Design',
     quantity: 5,
     priceUsd: '28.50',
     deliveryInfo:
@@ -349,11 +358,45 @@ async function wipe() {
   await prisma.order.deleteMany();
   await prisma.withdrawal.deleteMany();
   await prisma.listing.deleteMany();
+  await prisma.product.deleteMany();
   await prisma.user.deleteMany();
 }
 
 async function main() {
   await wipe();
+
+  // --- products ------------------------------------------------------------------
+  // Same upsert-by-slug the app runs on boot; after wipe() these are plain creates.
+  const products = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      category: string;
+      imageUrl: string | null;
+      retail: Prisma.Decimal;
+    }
+  >();
+  for (const p of CATALOG) {
+    const created = await prisma.product.upsert({
+      where: { slug: p.slug },
+      create: {
+        slug: p.slug,
+        name: p.name,
+        category: p.category,
+        retailPriceUsd: new Prisma.Decimal(p.retailPriceUsd),
+        imageUrl: p.imageUrl ?? null,
+      },
+      update: {},
+    });
+    products.set(p.slug, {
+      id: created.id,
+      name: created.name,
+      category: created.category,
+      imageUrl: created.imageUrl,
+      retail: created.retailPriceUsd,
+    });
+  }
 
   // --- users -------------------------------------------------------------------
   const userIds = {} as Record<UserKey, string>;
@@ -377,14 +420,17 @@ async function main() {
 
   // --- listings ----------------------------------------------------------------
   for (const l of LISTINGS) {
+    const product = products.get(l.product)!;
     await prisma.listing.create({
       data: {
         id: l.id,
         sellerId: userIds[l.seller],
-        title: l.title,
+        productId: product.id,
+        // copied from the product, exactly like POST /api/listings does
+        title: product.name,
+        category: product.category,
+        imageUrl: product.imageUrl,
         description: l.description,
-        category: l.category,
-        imageUrl: l.imageUrl,
         priceUsd: new Prisma.Decimal(l.priceUsd),
         deliveryInfo: l.deliveryInfo,
         quantity: l.quantity,
@@ -399,13 +445,14 @@ async function main() {
       },
     });
   }
-  const priceOf = new Map(LISTINGS.map((l) => [l.id, l.priceUsd]));
-  const titleOf = new Map(LISTINGS.map((l) => [l.id, l.title]));
+  const listingOf = new Map(LISTINGS.map((l) => [l.id, l]));
+  const productOf = (listingId: string) =>
+    products.get(listingOf.get(listingId)!.product)!;
 
   // --- withdrawal (created before the order that links to it) -------------------
   const withdrawnOrder = ORDERS.find((o) => o.id === 'ord_withdrawn_1')!;
   const withdrawnAmount = calcFee(
-    priceOf.get(withdrawnOrder.listingId)!,
+    listingOf.get(withdrawnOrder.listingId)!.priceUsd,
     FEE_PERCENT,
   ).sellerAmountUsd;
 
@@ -427,12 +474,15 @@ async function main() {
 
   // --- orders ------------------------------------------------------------------
   const sellerAmounts = new Map<string, Prisma.Decimal>();
+  const buyerAmounts = new Map<string, Prisma.Decimal>();
   for (const o of ORDERS) {
+    const product = productOf(o.listingId);
     const { amountUsd, feeUsd, sellerAmountUsd } = calcFee(
-      priceOf.get(o.listingId)!,
+      listingOf.get(o.listingId)!.priceUsd,
       FEE_PERCENT,
     );
     sellerAmounts.set(o.id, sellerAmountUsd);
+    buyerAmounts.set(o.id, amountUsd);
 
     const createdAt = days(o.paidDays ?? -1);
 
@@ -442,7 +492,10 @@ async function main() {
         listingId: o.listingId,
         buyerId: userIds[o.buyer],
         sellerId: userIds[o.seller],
-        titleSnapshot: titleOf.get(o.listingId)!,
+        titleSnapshot: product.name,
+        // retail price frozen at "purchase" time — feeds GET /api/stats/savings
+        productId: product.id,
+        retailPriceUsdSnapshot: product.retail,
         amountUsd,
         feeUsd,
         sellerAmountUsd,
@@ -492,12 +545,16 @@ async function main() {
     },
   });
 
-  printSummary(sellerAmounts);
+  printSummary(sellerAmounts, buyerAmounts, productOf);
 }
 
 // -------------------------------------------------------------------------- summary
 
-function printSummary(sellerAmounts: Map<string, Prisma.Decimal>) {
+function printSummary(
+  sellerAmounts: Map<string, Prisma.Decimal>,
+  buyerAmounts: Map<string, Prisma.Decimal>,
+  productOf: (listingId: string) => { retail: Prisma.Decimal },
+) {
   const keys: UserKey[] = ['admin', 'elena', 'marcus', 'priya', 'tom'];
   const buckets: Bucket[] = [
     'available',
@@ -544,7 +601,7 @@ function printSummary(sellerAmounts: Map<string, Prisma.Decimal>) {
     ` ${USERS.admin.username} <${USERS.admin.email}> is the ADMIN (from ADMIN_EMAILS).`,
   );
   out.push(
-    ` ${LISTINGS.length} active listings · ${ORDERS.length} orders · 2 disputes · 1 completed withdrawal`,
+    ` ${CATALOG.length} catalog products · ${LISTINGS.length} active listings · ${ORDERS.length} orders · 2 disputes · 1 completed withdrawal`,
   );
   out.push('');
   out.push(
@@ -564,6 +621,34 @@ function printSummary(sellerAmounts: Map<string, Prisma.Decimal>) {
     out.push(
       `   ${o.id.padEnd(idW)}  ${o.status.padEnd(stW)}  ` +
         `$${toFixed2(sellerAmounts.get(o.id)!).padStart(6)} → ${owner.padEnd(14)} ${o.note}`,
+    );
+  }
+  out.push('');
+
+  // Mirrors GET /api/stats/savings: PAID + DISPUTED orders only, retail snapshot
+  // minus what the buyer paid. REFUNDED / PENDING / EXPIRED count for nothing.
+  out.push(
+    ' BUYER SAVINGS — GET /api/stats/savings should match these numbers',
+  );
+  const savingsStatuses: OrderStatus[] = [
+    OrderStatus.PAID,
+    OrderStatus.DISPUTED,
+  ];
+  for (const k of keys) {
+    const bought = ORDERS.filter(
+      (o) => o.buyer === k && savingsStatuses.includes(o.status),
+    );
+    if (!bought.length) continue;
+    const spent = sum(bought.map((o) => buyerAmounts.get(o.id)!));
+    const retail = sum(bought.map((o) => productOf(o.listingId).retail));
+    const saved = retail.minus(spent);
+    const pct = retail.isZero()
+      ? '0.00'
+      : saved.times(100).dividedBy(retail).toFixed(2);
+    out.push(
+      `   ${USERS[k].email.padEnd(28)} ${String(bought.length)} orders · ` +
+        `spent $${toFixed2(spent)} · retail $${toFixed2(retail)} · ` +
+        `saved $${toFixed2(saved)} (${pct}%)`,
     );
   }
   out.push('');

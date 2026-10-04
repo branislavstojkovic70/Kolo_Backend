@@ -121,7 +121,9 @@ export class AdminService {
       ...(q.search
         ? {
             order: {
-              is: { titleSnapshot: { contains: q.search, mode: 'insensitive' } },
+              is: {
+                titleSnapshot: { contains: q.search, mode: 'insensitive' },
+              },
             },
           }
         : {}),
@@ -354,6 +356,7 @@ export class AdminService {
       paidOut,
       openDisputes,
       disputesByStatus,
+      savings,
     ] = await Promise.all([
       this.prisma.user.count(),
       this.prisma.listing.count(),
@@ -377,6 +380,11 @@ export class AdminService {
       }),
       this.prisma.dispute.count({ where: { status: DisputeStatus.OPEN } }),
       this.prisma.dispute.groupBy({ by: ['status'], _count: { _all: true } }),
+      // buyer savings vs. the retail snapshot — same statuses as /api/stats/savings
+      this.prisma.order.aggregate({
+        where: { status: { in: [OrderStatus.PAID, OrderStatus.DISPUTED] } },
+        _sum: { amountUsd: true, retailPriceUsdSnapshot: true },
+      }),
     ]);
 
     const counts = (rows: { status: string; _count: { _all: number } }[]) =>
@@ -409,6 +417,15 @@ export class AdminService {
         platformFeesUsd: toFixed2(sum([settled._sum.feeUsd ?? 0])),
         inEscrowUsd: toFixed2(sum([escrow._sum.sellerAmountUsd ?? 0])),
         paidOutUsd: toFixed2(sum([paidOut._sum.amountUsd ?? 0])),
+        // what buyers saved vs. retail across all PAID/DISPUTED orders
+        buyerRetailUsd: toFixed2(
+          sum([savings._sum.retailPriceUsdSnapshot ?? 0]),
+        ),
+        buyerSavedUsd: toFixed2(
+          sum([savings._sum.retailPriceUsdSnapshot ?? 0]).minus(
+            sum([savings._sum.amountUsd ?? 0]),
+          ),
+        ),
       },
     };
   }

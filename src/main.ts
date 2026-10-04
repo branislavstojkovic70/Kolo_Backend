@@ -92,12 +92,22 @@ async function bootstrap() {
       'Who am I. The account is created on the first authenticated request.',
     )
     .addTag(
+      'products',
+      'The predefined product catalog. A listing can only sell one of these; ' +
+        '`retailPriceUsd` is the official price the seller undercuts.',
+    )
+    .addTag(
       'listings',
-      'The marketplace catalogue. Browsing is public; writing is owner-only.',
+      'The marketplace catalogue. Browsing is public; writing is owner-only. ' +
+        'Every listing points at a catalog product — title and category come from it.',
     )
     .addTag(
       'orders',
       'Buying: order + OxaPay invoice, then the buyer-facing order views.',
+    )
+    .addTag(
+      'stats',
+      'Buyer savings vs. retail, computed from the price snapshot taken at purchase time.',
     )
     .addTag(
       'wallet',

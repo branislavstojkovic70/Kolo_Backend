@@ -109,6 +109,8 @@ export class ListingsController {
   @ApiOperation({
     summary: 'Create a listing',
     description:
+      '`productId` must be an active catalog product (GET /api/products) — the listing ' +
+      'title and category are copied from it; an unknown or inactive product is a 400. ' +
       '`priceUsd` is a number with at most 2 decimals; it comes back as a 2-decimal string. ' +
       '`deliveryInfo` (credentials, redeem codes, instructions) is stored but is only ever ' +
       'revealed to the buyer of a paid order.',
@@ -130,7 +132,8 @@ export class ListingsController {
   @ApiOperation({
     summary: 'Update a listing (owner only)',
     description:
-      'Every field is optional; omitted fields are untouched. `status` may be set to `ACTIVE` ' +
+      'Every field is optional; omitted fields are untouched. `productId` cannot be changed — ' +
+      'title and category always mirror the catalog product. `status` may be set to `ACTIVE` ' +
       'or `PAUSED` — use DELETE to soft-delete.',
   })
   @ApiParam({ name: 'id', example: 'lst_youtube' })

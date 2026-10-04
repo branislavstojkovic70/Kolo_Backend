@@ -40,6 +40,25 @@ enum WithdrawalStatus {
   FAILED
 }
 
+// The predefined catalog — sellers can only list products that exist here.
+// Rows come from prisma/products.json, upserted by slug on every boot
+// (ProductsService.onModuleInit), so the catalog is code-managed, never user input.
+model Product {
+  id             String  @id @default(cuid())
+  slug           String  @unique
+  name           String
+  category       String
+  retailPriceUsd Decimal @db.Decimal(18, 2) // official/regular price
+  imageUrl       String?
+  active         Boolean @default(true)
+
+  listings Listing[]
+  orders   Order[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model User {
   id               String  @id @default(cuid())
   clerkUserId      String  @unique // subject from the Clerk JWT
@@ -66,9 +85,14 @@ model Listing {
   id           String        @id @default(cuid())
   sellerId     String
   seller       User          @relation(fields: [sellerId], references: [id])
+  // the catalog entry this listing sells — immutable after creation
+  productId    String
+  product      Product       @relation(fields: [productId], references: [id])
+  // title/category are COPIED from the product at write time so every existing
+  // response shape stays identical for the FE. Never user input anymore.
   title        String
   description  String
-  category     String? // free text, no separate table
+  category     String?
   // cover art shown on the marketplace card and the detail page — a plain
   // external URL, no upload/hosting on our side
   imageUrl     String?
@@ -101,6 +125,11 @@ model Order {
 
   // snapshot at purchase time — listing may change later
   titleSnapshot   String
+  // catalog product + its retail price AT PURCHASE TIME. Savings are always
+  // computed from this snapshot, never from the live catalog (prices change).
+  productId              String
+  product                Product @relation(fields: [productId], references: [id])
+  retailPriceUsdSnapshot Decimal @db.Decimal(18, 2)
   amountUsd       Decimal @db.Decimal(18, 2) // what the buyer pays
   feeUsd          Decimal @db.Decimal(18, 2) // platform fee
   sellerAmountUsd Decimal @db.Decimal(18, 2) // amount - fee = escrowed amount
