@@ -9,6 +9,7 @@ import { ListingStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { toFixed2 } from '../../common/money';
 import { AutoBuyService } from '../buy-requests/auto-buy.service';
+import { ListingInventoryService } from '../inventory/listing-inventory.service';
 import { mapProduct, PRODUCT_SELECT } from '../products/products.service';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
@@ -30,9 +31,6 @@ const LISTING_SELECT = {
   quantity: true,
   soldCount: true,
   status: true,
-  // auto-buy reservation — null unless the listing is RESERVED
-  reservedUntil: true,
-  reservedForId: true,
   createdAt: true,
   updatedAt: true,
   seller: { select: { id: true, username: true, imageUrl: true } },
@@ -58,6 +56,7 @@ export class ListingsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly autoBuy: AutoBuyService,
+    private readonly inventory: ListingInventoryService,
   ) {}
 
   /** search / category / price-range, shared by the public feed and "my listings". */
@@ -80,17 +79,34 @@ export class ListingsService {
     };
   }
 
-  private map(l: SelectedListing) {
+  private map(l: SelectedListing, availableCount: number) {
     return {
       ...l,
       priceUsd: toFixed2(l.priceUsd),
+      // quantity - soldCount - units held by unpaid orders. The number the FE
+      // should gate its buy button on; quantity/soldCount stay as they were.
+      availableCount,
       product: mapProduct(l.product),
     };
   }
 
+  /** One availability query for a whole page, then map. */
+  private async mapPage(listings: SelectedListing[]) {
+    const available = await this.inventory.availableCounts(
+      listings.map((l) => l.id),
+    );
+    return listings.map((l) => this.map(l, available.get(l.id) ?? 0));
+  }
+
   async findPublic(q: QueryListingsDto) {
+    // Listings with every unit sold or currently held are not on offer. Prisma
+    // cannot express the arithmetic in a `where`, so the full ones are excluded
+    // by id and the rest of the feed query stays exactly as it was.
+    const fullIds = await this.inventory.fullListingIds();
+
     const where: Prisma.ListingWhereInput = {
       status: ListingStatus.ACTIVE,
+      ...(fullIds.length ? { id: { notIn: fullIds } } : {}),
       ...this.filters(q),
     };
 
@@ -106,7 +122,7 @@ export class ListingsService {
     ]);
 
     return {
-      items: items.map((l) => this.map(l)),
+      items: await this.mapPage(items),
       total,
       page: q.page,
       limit: q.limit,
@@ -114,13 +130,20 @@ export class ListingsService {
     };
   }
 
+  /**
+   * Detail stays readable even at `availableCount: 0` — a deep link to a listing
+   * whose units are momentarily all held must render "fully reserved", not a 404
+   * that turns back into a 200 fifteen minutes later.
+   */
   async findOnePublic(id: string) {
     const listing = await this.prisma.listing.findFirst({
       where: { id, status: { not: ListingStatus.DELETED } },
       select: LISTING_SELECT,
     });
     if (!listing) throw new NotFoundException('Listing not found');
-    return this.map(listing);
+
+    const available = await this.inventory.availableCounts([listing.id]);
+    return this.map(listing, available.get(listing.id) ?? 0);
   }
 
   async findMine(sellerId: string, q: QueryListingsDto) {
@@ -141,8 +164,18 @@ export class ListingsService {
       this.prisma.listing.count({ where }),
     ]);
 
+    // The seller also sees who is holding which unit and until when.
+    const ids = items.map((l) => l.id);
+    const [mapped, reservations] = await Promise.all([
+      this.mapPage(items),
+      this.inventory.activeReservationsFor(ids),
+    ]);
+
     return {
-      items: items.map((l) => this.map(l)),
+      items: mapped.map((l) => ({
+        ...l,
+        reservations: reservations.get(l.id) ?? [],
+      })),
       total,
       page: q.page,
       limit: q.limit,
@@ -220,18 +253,12 @@ export class ListingsService {
       select: LISTING_SELECT,
     });
 
-    // Auto-buy: a standing wish may claim this listing the instant it exists.
-    // A matching failure must NEVER fail the seller's POST — worst case the
-    // cron's safety sweep picks the pair up a minute later.
+    // Auto-buy: standing wishes may claim units the instant the listing exists —
+    // as many units as there are waiting buyers. A matching failure must NEVER
+    // fail the seller's POST; worst case the cron's safety sweep picks the pairs
+    // up a minute later.
     try {
-      const matched = await this.autoBuy.tryMatchListing(listing.id);
-      if (matched) {
-        const reserved = await this.prisma.listing.findUnique({
-          where: { id: listing.id },
-          select: LISTING_SELECT,
-        });
-        if (reserved) return this.map(reserved);
-      }
+      await this.autoBuy.tryMatchListing(listing.id);
     } catch (e) {
       this.logger.error(
         `Auto-buy matching failed for new listing ${listing.id}: ${e?.message}`,
@@ -239,41 +266,50 @@ export class ListingsService {
       );
     }
 
-    return this.map(listing);
+    // Re-read: matching may have consumed units, so availableCount and status
+    // must reflect the post-match reality.
+    const fresh =
+      (await this.prisma.listing.findUnique({
+        where: { id: listing.id },
+        select: LISTING_SELECT,
+      })) ?? listing;
+    const available = await this.inventory.availableCounts([fresh.id]);
+    return this.map(fresh, available.get(fresh.id) ?? 0);
   }
 
   async update(id: string, sellerId: string, dto: UpdateListingDto) {
     const current = await this.assertOwner(id, sellerId);
 
-    // While an auto-buy reservation holds the listing, its status belongs to the
-    // reservation lifecycle (paid → SOLD, lapsed → ACTIVE), not to the seller.
-    if (current.status === ListingStatus.RESERVED && dto.status !== undefined) {
-      throw new BadRequestException(
-        'This listing is reserved by an auto-buy order awaiting payment — its status cannot be changed until the reservation resolves.',
-      );
-    }
-
-    // Restocking revives a sold-out listing; shrinking below what is already sold
-    // is not a thing that can happen, so it is a 400 rather than a silent clamp.
-    if (dto.quantity !== undefined && dto.quantity < current.soldCount) {
-      throw new BadRequestException(
-        `You have already sold ${current.soldCount} of these — the quantity cannot go below that`,
-      );
+    // Shrinking below what is already sold OR currently held by an unpaid order
+    // would break the inventory invariant, so it is a 400 rather than a silent
+    // clamp. Held units are included: those buyers may still pay.
+    if (dto.quantity !== undefined) {
+      const available = await this.inventory.availableCounts([id]);
+      const held =
+        current.quantity - current.soldCount - (available.get(id) ?? 0);
+      const committed = current.soldCount + held;
+      if (dto.quantity < committed) {
+        throw new BadRequestException(
+          `${current.soldCount} sold and ${held} reserved by buyers who are paying right now — ` +
+            `the quantity cannot go below ${committed}`,
+        );
+      }
     }
 
     const quantity = dto.quantity ?? current.quantity;
-    const soldOut = current.soldCount >= quantity;
+    const fullySold = current.soldCount >= quantity;
 
-    // Stock has the last word: a seller cannot re-activate a listing with nothing
-    // left to sell, and restocking a sold-out one puts it back on the marketplace.
-    // Anything else (PAUSED in particular) is left exactly as asked for.
-    const requested = dto.status ?? current.status;
-    const status =
-      soldOut && requested === ListingStatus.ACTIVE
-        ? ListingStatus.SOLD_OUT
-        : !soldOut && requested === ListingStatus.SOLD_OUT
+    // Stock has the last word: every unit paid for means SOLD no matter what was
+    // asked for, and restocking a SOLD listing puts it back on the marketplace.
+    // Reservations do not enter into it — a listing whose free units are merely
+    // held stays exactly as the seller left it (ACTIVE or PAUSED).
+    const status = fullySold
+      ? ListingStatus.SOLD
+      : (dto.status ??
+        (current.status === ListingStatus.SOLD ||
+        current.status === ListingStatus.SOLD_OUT
           ? ListingStatus.ACTIVE
-          : requested;
+          : current.status));
 
     // productId, title and category are deliberately not updatable — the product
     // is fixed at creation and title/category always mirror it.
@@ -291,16 +327,15 @@ export class ListingsService {
       },
       select: LISTING_SELECT,
     });
-    return this.map(listing);
+    const available = await this.inventory.availableCounts([listing.id]);
+    return this.map(listing, available.get(listing.id) ?? 0);
   }
 
   async remove(id: string, sellerId: string) {
-    const current = await this.assertOwner(id, sellerId);
-    if (current.status === ListingStatus.RESERVED) {
-      throw new BadRequestException(
-        'This listing is reserved by an auto-buy order awaiting payment — wait for the reservation to resolve before deleting it.',
-      );
-    }
+    await this.assertOwner(id, sellerId);
+    // Soft-delete is allowed even with units held: the reservations live in their
+    // own rows and are unaffected, so a buyer mid-payment can still complete and
+    // settle. Hiding the listing does not cancel anyone's order.
     await this.prisma.listing.update({
       where: { id },
       data: { status: ListingStatus.DELETED },

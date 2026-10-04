@@ -37,10 +37,13 @@ export class ListingsController {
   @Public()
   @Get()
   @ApiOperation({
-    summary: 'Browse active listings (public, no token needed)',
+    summary: 'Browse buyable listings (public, no token needed)',
     description:
-      'Only `ACTIVE` listings, newest first. `search` matches the title case-insensitively, ' +
-      '`category` is an exact case-insensitive match. `deliveryInfo` is never included.',
+      'Only `ACTIVE` listings that still have a free unit (`availableCount > 0`), newest ' +
+      'first. A listing whose remaining units are all held by buyers mid-payment drops out ' +
+      'of the feed and comes back if those reservations lapse. `search` matches the title ' +
+      'case-insensitively, `category` is an exact case-insensitive match. `deliveryInfo` ' +
+      'is never included.',
   })
   @ApiOkResponse({
     description: 'Paginated listings',
@@ -74,11 +77,13 @@ export class ListingsController {
     description:
       'Everything I sell except soft-deleted rows, paginated. Includes `PAUSED` ' +
       'listings, and takes the same `search` / `category` / price / `sort` filters ' +
-      'as the public feed.',
+      'as the public feed. Unlike the public feed it also lists the units currently ' +
+      '**held** by buyers who are paying right now, in `reservations` — so a seller ' +
+      'can see why `availableCount` is lower than `quantity - soldCount`.',
   })
   @ApiOkResponse({
-    description: 'My listings',
-    schema: { example: EX.LISTING_PAGE },
+    description: 'My listings, with the units held by in-flight orders',
+    schema: { example: EX.LISTING_MINE_PAGE },
   })
   findMine(@CurrentUser() user: User, @Query() q: QueryListingsDto) {
     return this.listings.findMine(user.id, q);
@@ -89,7 +94,10 @@ export class ListingsController {
   @ApiOperation({
     summary: 'Listing detail (public, no token needed)',
     description:
-      'Soft-deleted listings return 404. `deliveryInfo` is never included.',
+      'Soft-deleted listings return 404. Unlike the feed, a listing with ' +
+      '`availableCount: 0` is still returned here — a deep link has to render ' +
+      '"fully reserved" rather than break — so check `availableCount` before ' +
+      'offering the buy button. `deliveryInfo` is never included.',
   })
   @ApiParam({ name: 'id', example: 'lst_youtube' })
   @ApiOkResponse({

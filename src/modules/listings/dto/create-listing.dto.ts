@@ -53,8 +53,9 @@ export class CreateListingDto {
     example: 1,
     default: 1,
     description:
-      'How many times this listing can be sold. The listing leaves the ' +
-      'marketplace as SOLD_OUT once that many orders exist.',
+      'How many times this listing can be sold. Each unpaid order holds one unit ' +
+      'until it is paid or its reservation lapses; the listing leaves the ' +
+      'marketplace as SOLD once every unit has been paid for.',
   })
   @IsOptional()
   @Type(() => Number)

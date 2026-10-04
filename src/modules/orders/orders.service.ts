@@ -1,7 +1,6 @@
 import {
   BadGatewayException,
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -11,6 +10,10 @@ import { ConfigService } from '@nestjs/config';
 import { ListingStatus, OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { calcFee, toFixed2 } from '../../common/money';
+import {
+  ListingInventoryService,
+  NoUnitsAvailable,
+} from '../inventory/listing-inventory.service';
 import { OxapayService } from '../payments/oxapay.service';
 import { OrderRole, QueryOrdersDto } from './dto/query-orders.dto';
 
@@ -66,6 +69,7 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly oxapay: OxapayService,
+    private readonly inventory: ListingInventoryService,
   ) {}
 
   private map(o: SelectedOrder) {
@@ -95,11 +99,6 @@ export class OrdersService {
     if (!listing) {
       throw new NotFoundException('Listing not found or not available');
     }
-    if (listing.status === ListingStatus.RESERVED) {
-      throw new BadRequestException(
-        'This listing is reserved for another buyer right now. If their payment window expires it comes back on the marketplace.',
-      );
-    }
     if (listing.status !== ListingStatus.ACTIVE) {
       throw new NotFoundException('Listing not found or not available');
     }
@@ -107,23 +106,32 @@ export class OrdersService {
       throw new BadRequestException('You cannot buy your own listing');
     }
 
-    // Claim one unit. A single conditional UPDATE, so two buyers racing for the
-    // last unit can never both win — the loser's updateMany matches no row.
-    const claimed = await this.prisma.listing.updateMany({
-      where: {
-        id: listing.id,
-        status: ListingStatus.ACTIVE,
-        soldCount: { lt: this.prisma.listing.fields.quantity },
-      },
-      data: { soldCount: { increment: 1 } },
-    });
-    if (claimed.count === 0) {
-      throw new ConflictException('This listing just sold out');
+    // Claim one unit and create the order + its reservation atomically. Other
+    // units of the same listing stay on sale — only this unit is held, and it is
+    // held whether the order came from here or from the auto-buy matcher.
+    let order: SelectedOrder;
+    try {
+      order = await this.prisma.$transaction(async (tx) => {
+        await this.inventory.lockAndAssertUnitAvailable(tx, listing.id);
+        // Created inside the claim so a failing OxaPay call still leaves an
+        // auditable row, and so the reservation always has an order to point at.
+        const created = await this.createPendingOrderRow(buyerId, listing, tx);
+        await this.inventory.reserveUnit(tx, {
+          listingId: listing.id,
+          buyerId,
+          orderId: created.id,
+          expiresAt: this.inventory.reservationDeadline(),
+        });
+        return created;
+      });
+    } catch (e) {
+      if (e instanceof NoUnitsAvailable) {
+        throw new BadRequestException(
+          'This listing is sold out or fully reserved right now. If a reservation expires it comes back on the marketplace.',
+        );
+      }
+      throw e;
     }
-    await this.markSoldOutIfClaimed(listing.id);
-
-    // Created first so a failing OxaPay call still leaves an auditable row.
-    const order = await this.createPendingOrderRow(buyerId, listing);
 
     let updated: SelectedOrder;
     try {
@@ -131,11 +139,11 @@ export class OrdersService {
     } catch (e) {
       // Leave the row PENDING_PAYMENT with a null trackId — never delete it.
       // The unit goes back on the shelf though: without an invoice this order can
-      // never be paid, and an OxaPay outage must not sell a listing out.
+      // never be paid, and an OxaPay outage must not hold a unit hostage.
       this.logger.error(
         `Invoice creation failed for order ${order.id}: ${e?.message}`,
       );
-      await this.releaseUnit(listing.id);
+      await this.inventory.releaseUnit(order.id);
       throw new BadGatewayException(
         'Could not create the payment invoice. The order was saved — please retry payment.',
       );
@@ -200,33 +208,6 @@ export class OrdersService {
     });
   }
 
-  /** Off the marketplace as soon as the last unit is claimed. */
-  private async markSoldOutIfClaimed(listingId: string) {
-    await this.prisma.listing.updateMany({
-      where: {
-        id: listingId,
-        status: ListingStatus.ACTIVE,
-        soldCount: { gte: this.prisma.listing.fields.quantity },
-      },
-      data: { status: ListingStatus.SOLD_OUT },
-    });
-  }
-
-  /** Give a claimed unit back and put a sold-out listing back on the marketplace. */
-  private async releaseUnit(listingId: string) {
-    await this.prisma.listing.updateMany({
-      where: { id: listingId, soldCount: { gt: 0 } },
-      data: { soldCount: { decrement: 1 } },
-    });
-    await this.prisma.listing.updateMany({
-      where: {
-        id: listingId,
-        status: ListingStatus.SOLD_OUT,
-        soldCount: { lt: this.prisma.listing.fields.quantity },
-      },
-      data: { status: ListingStatus.ACTIVE },
-    });
-  }
 
   /**
    * Both sides in one page. `/purchases` and `/sales` stay as they were, but a

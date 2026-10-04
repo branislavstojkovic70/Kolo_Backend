@@ -33,14 +33,19 @@ export class OrdersController {
       '`sellerAmountUsd`, then asks OxaPay for an invoice. Send the buyer to `paymentUrl`. ' +
       'The order stays `PENDING_PAYMENT` until the OxaPay webhook confirms payment — ' +
       'that webhook is what sets `paidAt` and `vestedAt`. ' +
-      'You cannot buy your own listing.',
+      'You cannot buy your own listing.\n\n' +
+      'Creating the order **reserves one unit** of the listing for ' +
+      '`autoBuyReservationMinutes` (GET /api/config), so nobody can take it while you pay. ' +
+      'Other units stay on sale. If the listing has no free unit right now — sold out, or ' +
+      'every remaining unit held by other buyers — this returns `400`; the unit comes back ' +
+      'if a reservation lapses.',
   })
   @ApiCreatedResponse({
     description: 'Order created, invoice ready',
     schema: { example: EX.ORDER_CREATED },
   })
   @ApiBadRequestResponse({
-    description: 'Buying your own listing',
+    description: 'Buying your own listing, or no unit is free right now',
     type: ErrorResponseDto,
   })
   @ApiNotFoundResponse({

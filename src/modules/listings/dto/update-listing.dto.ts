@@ -8,7 +8,7 @@ import { CreateListingDto } from './create-listing.dto';
 export class UpdateListingDto extends PartialType(
   OmitType(CreateListingDto, ['productId'] as const),
 ) {
-  // RESERVED / SOLD / DELETED are lifecycle states the system owns — a seller
+  // SOLD / SOLD_OUT / DELETED are lifecycle states the system owns — a seller
   // can only ever ask for ACTIVE or PAUSED here.
   @ApiPropertyOptional({ enum: [ListingStatus.ACTIVE, ListingStatus.PAUSED] })
   @IsOptional()

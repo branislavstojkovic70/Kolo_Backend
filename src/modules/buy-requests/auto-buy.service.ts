@@ -8,6 +8,10 @@ import {
   Prisma,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  ListingInventoryService,
+  NoUnitsAvailable,
+} from '../inventory/listing-inventory.service';
 import { OrdersService } from '../orders/orders.service';
 
 /** Thrown inside the claim transaction when a concurrent claim got there first. */
@@ -24,8 +28,17 @@ const LISTING_FOR_ORDER = {
 } satisfies Prisma.ListingSelect;
 
 /**
+ * Why a single match attempt ended. `no-units` is the only one that means "this
+ * listing is full" — a lost race just means another wish won this unit and the
+ * next candidate should get a turn.
+ */
+type MatchOutcome = 'matched' | 'race' | 'no-units' | 'failed';
+
+/**
  * Auto-buy: standing BuyRequests are matched against listings synchronously at
- * creation time (of either side). The cron below only cleans up expired
+ * creation time (of either side). Matching claims **one unit** per wish through
+ * the same inventory path a manual buy uses, so one multi-unit listing can serve
+ * several different wishes at once. The cron below only cleans up lapsed
  * reservations/requests and acts as a safety net for anything the synchronous
  * path missed. Money-wise this is a plain order — the buyer pays the OxaPay
  * invoice themselves; there is no internal deposit balance.
@@ -38,38 +51,35 @@ export class AutoBuyService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly orders: OrdersService,
+    private readonly inventory: ListingInventoryService,
   ) {}
 
   private get enabled(): boolean {
     return this.config.get<boolean>('autoBuy.enabled') ?? true;
   }
 
-  private reservationDeadline(): Date {
-    const minutes = this.config.get<number>('autoBuy.reservationMinutes') ?? 15;
-    return new Date(Date.now() + minutes * 60_000);
-  }
-
   /**
-   * A listing just appeared (or came back) — give it to the oldest waiting
-   * BuyRequest (FIFO: first to register wins). Returns true if a match claimed
-   * the listing. Callers on the request path must wrap this in try/catch — a
-   * matching failure must never fail the seller's POST /api/listings.
+   * A listing just appeared (or freed a unit) — hand its free units to the
+   * longest-waiting wishes, FIFO, until the units run out or nobody is left
+   * waiting. Returns how many matches were made. Callers on the request path
+   * must wrap this in try/catch: a matching failure must never fail the seller's
+   * POST /api/listings.
    *
-   * `excludeRequestId`: on reservation expiry the non-paying request goes back
-   * to ACTIVE but must not immediately re-claim the very listing it just sat
-   * on — the next buyer in line gets it.
+   * `excludeRequestIds`: when a reservation lapses the non-paying wish goes back
+   * to ACTIVE, but it must not instantly re-claim the very unit it just sat on —
+   * the next buyer in line gets first refusal.
    */
   async tryMatchListing(
     listingId: string,
-    excludeRequestId?: string,
-  ): Promise<boolean> {
-    if (!this.enabled) return false;
+    excludeRequestIds: string[] = [],
+  ): Promise<number> {
+    if (!this.enabled) return 0;
 
     const listing = await this.prisma.listing.findUnique({
       where: { id: listingId },
-      select: { ...LISTING_FOR_ORDER, status: true },
+      select: LISTING_FOR_ORDER,
     });
-    if (!listing || listing.status !== ListingStatus.ACTIVE) return false;
+    if (!listing || listing.status !== ListingStatus.ACTIVE) return 0;
 
     const candidates = await this.prisma.buyRequest.findMany({
       where: {
@@ -78,17 +88,27 @@ export class AutoBuyService {
         buyerId: { not: listing.sellerId }, // never match the seller's own wish
         maxPriceUsd: { gte: listing.priceUsd },
         OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-        ...(excludeRequestId ? { id: { not: excludeRequestId } } : {}),
+        ...(excludeRequestIds.length
+          ? { id: { notIn: excludeRequestIds } }
+          : {}),
       },
       orderBy: { createdAt: 'asc' },
       select: { id: true },
     });
 
-    // FIFO; if a claim races and loses, the next-in-line request gets its turn.
+    let matched = 0;
     for (const candidate of candidates) {
-      if (await this.matchPair(candidate.id, listing.id)) return true;
+      const outcome = await this.matchPair(candidate.id, listing.id);
+      // Keep going after a win: a quantity-2 listing should satisfy two wishes.
+      if (outcome === 'matched') {
+        matched++;
+        continue;
+      }
+      // Out of units, or OxaPay is refusing invoices — stop pestering it.
+      if (outcome === 'no-units' || outcome === 'failed') break;
+      // 'race': this wish got claimed elsewhere, try the next one.
     }
-    return false;
+    return matched;
   }
 
   /**
@@ -124,56 +144,41 @@ export class AutoBuyService {
     });
 
     for (const listing of listings) {
-      if (await this.matchPair(request.id, listing.id)) return true;
+      const outcome = await this.matchPair(request.id, listing.id);
+      if (outcome === 'matched') return true;
+      if (outcome === 'failed') return false;
+      // 'no-units' / 'race' — this listing cannot serve us, try the next one.
     }
     return false;
   }
 
   /**
-   * Claim both sides defensively in ONE transaction (conditional updateMany on
-   * status — a lost race rolls everything back, no order), create the order via
-   * the shared OrdersService path, then ask OxaPay for the invoice. An invoice
-   * failure is compensated: listing and request go back to ACTIVE, the order
-   * stays PENDING_PAYMENT with a null trackId. A listing is never left RESERVED
-   * without a live payment window.
+   * One wish ← one unit. The claim and the wish transition happen in ONE
+   * transaction: the inventory lock guarantees the unit, the conditional
+   * updateMany on the wish guarantees it is not double-matched, and either
+   * failure rolls the whole thing back. The OxaPay invoice is requested after
+   * the commit; if it fails the unit and the wish both go back.
    */
   private async matchPair(
     buyRequestId: string,
     listingId: string,
-  ): Promise<boolean> {
+  ): Promise<MatchOutcome> {
     const listing = await this.prisma.listing.findUnique({
       where: { id: listingId },
       select: LISTING_FOR_ORDER,
     });
     const request = await this.prisma.buyRequest.findUnique({
       where: { id: buyRequestId },
-      select: { id: true, buyerId: true, maxPriceUsd: true },
+      select: { id: true, buyerId: true },
     });
-    if (!listing || !request) return false;
+    if (!listing || !request) return 'race';
 
-    const reservedUntil = this.reservationDeadline();
+    const expiresAt = this.inventory.reservationDeadline();
 
     let order: Awaited<ReturnType<OrdersService['createPendingOrderRow']>>;
     try {
       order = await this.prisma.$transaction(async (tx) => {
-        // Claim the listing: must still be ACTIVE with a free unit. The claim
-        // takes one unit (like a manual order) AND reserves the whole listing.
-        // TODO: a multi-unit listing is fully off the market while reserved and
-        // goes SOLD outright on payment — acceptable for the MVP.
-        const claimedListing = await tx.listing.updateMany({
-          where: {
-            id: listingId,
-            status: ListingStatus.ACTIVE,
-            soldCount: { lt: this.prisma.listing.fields.quantity },
-          },
-          data: {
-            status: ListingStatus.RESERVED,
-            reservedForId: request.buyerId,
-            reservedUntil,
-            soldCount: { increment: 1 },
-          },
-        });
-        if (claimedListing.count === 0) throw new MatchRaceLost();
+        await this.inventory.lockAndAssertUnitAvailable(tx, listingId);
 
         const claimedRequest = await tx.buyRequest.updateMany({
           where: { id: buyRequestId, status: BuyRequestStatus.ACTIVE },
@@ -194,14 +199,21 @@ export class AutoBuyService {
           where: { id: buyRequestId },
           data: { matchedOrderId: created.id },
         });
+        await this.inventory.reserveUnit(tx, {
+          listingId,
+          buyerId: request.buyerId,
+          orderId: created.id,
+          expiresAt,
+        });
         return created;
       });
     } catch (e) {
+      if (e instanceof NoUnitsAvailable) return 'no-units';
       if (e instanceof MatchRaceLost) {
         this.logger.log(
           `Auto-buy race lost: request ${buyRequestId} vs listing ${listingId} — someone else claimed first`,
         );
-        return false;
+        return 'race';
       }
       throw e;
     }
@@ -211,67 +223,49 @@ export class AutoBuyService {
     } catch (e) {
       this.logger.error(
         `!!! AUTO-BUY INVOICE FAILED !!! order ${order.id} (request ${buyRequestId}, listing ${listingId}): ` +
-          `${e?.message} — rolling the match back, listing returns to ACTIVE`,
+          `${e?.message} — rolling the match back, the unit goes back on sale`,
       );
-      await this.prisma.$transaction([
-        this.prisma.listing.updateMany({
-          where: { id: listingId, status: ListingStatus.RESERVED },
-          data: {
-            status: ListingStatus.ACTIVE,
-            reservedForId: null,
-            reservedUntil: null,
-            soldCount: { decrement: 1 },
-          },
-        }),
-        this.prisma.buyRequest.updateMany({
-          where: { id: buyRequestId, status: BuyRequestStatus.MATCHED },
-          data: {
-            status: BuyRequestStatus.ACTIVE,
-            matchedListingId: null,
-            matchedOrderId: null,
-            matchedAt: null,
-          },
-        }),
-      ]);
-      return false;
+      await this.inventory.releaseUnit(order.id);
+      await this.prisma.buyRequest.updateMany({
+        where: { id: buyRequestId, status: BuyRequestStatus.MATCHED },
+        data: {
+          status: BuyRequestStatus.ACTIVE,
+          matchedListingId: null,
+          matchedOrderId: null,
+          matchedAt: null,
+        },
+      });
+      return 'failed';
     }
 
     this.logger.log(
-      `AUTO-BUY MATCH: request ${buyRequestId} ← listing ${listingId}, order ${order.id}, ` +
-        `reserved until ${reservedUntil.toISOString()}`,
+      `AUTO-BUY MATCH: request ${buyRequestId} ← listing ${listingId} (1 unit), order ${order.id}, ` +
+        `held until ${expiresAt.toISOString()}`,
     );
-    return true;
+    return 'matched';
   }
 
   /**
    * The one permitted payment-webhook hook. If the paid order fulfils a buy
-   * request: request FULFILLED, listing SOLD, reservation cleared. Manual
-   * purchases have no matching request and fall straight through.
+   * request, the request becomes FULFILLED. The listing side (reservation →
+   * soldCount, SOLD when the last unit settles) belongs to
+   * ListingInventoryService and is done by the webhook before this runs.
+   * Manual purchases have no matching request and fall straight through.
    */
-  async onOrderPaid(order: { id: string; listingId: string }): Promise<void> {
+  async onOrderPaid(order: { id: string }): Promise<void> {
     const request = await this.prisma.buyRequest.findFirst({
       where: { matchedOrderId: order.id, status: BuyRequestStatus.MATCHED },
       select: { id: true },
     });
     if (!request) return; // manual purchase — nothing auto-buy about it
 
-    await this.prisma.$transaction([
-      this.prisma.buyRequest.update({
-        where: { id: request.id },
-        data: { status: BuyRequestStatus.FULFILLED },
-      }),
-      this.prisma.listing.updateMany({
-        where: { id: order.listingId, status: ListingStatus.RESERVED },
-        data: {
-          status: ListingStatus.SOLD,
-          reservedForId: null,
-          reservedUntil: null,
-        },
-      }),
-    ]);
+    await this.prisma.buyRequest.update({
+      where: { id: request.id },
+      data: { status: BuyRequestStatus.FULFILLED },
+    });
 
     this.logger.log(
-      `AUTO-BUY FULFILLED: order ${order.id} paid — request ${request.id} FULFILLED, listing ${order.listingId} SOLD`,
+      `AUTO-BUY FULFILLED: order ${order.id} paid — request ${request.id} FULFILLED`,
     );
   }
 
@@ -301,87 +295,62 @@ export class AutoBuyService {
   }
 
   /**
-   * Reservations whose payment window lapsed: order → EXPIRED, listing → back
-   * to ACTIVE, request → back to ACTIVE so it can match again. Then immediately
-   * re-run matching for the listing — a second buyer may already be waiting.
+   * Reservations whose payment window lapsed: order → EXPIRED, the held unit is
+   * freed, and a wish that was waiting on it goes back to ACTIVE. Then matching
+   * re-runs for that listing — another buyer may already be queued. Applies to
+   * manual and auto-buy orders alike; a manual one simply has no wish attached.
    */
   private async expireReservations(): Promise<void> {
-    const stale = await this.prisma.listing.findMany({
-      where: {
-        status: ListingStatus.RESERVED,
-        reservedUntil: { lt: new Date() },
+    const stale = await this.prisma.listingReservation.findMany({
+      where: { expiresAt: { lt: new Date() } },
+      select: {
+        id: true,
+        listingId: true,
+        orderId: true,
+        order: { select: { id: true, status: true } },
       },
-      select: { id: true },
     });
 
-    for (const { id: listingId } of stale) {
+    // listingId → wishes that must not instantly re-claim the unit they lost
+    const reMatch = new Map<string, string[]>();
+
+    for (const reservation of stale) {
+      // Keyed on the ORDER, not the listing: several wishes can now be matched
+      // against the same listing at once, so the listing alone is ambiguous.
       const request = await this.prisma.buyRequest.findFirst({
         where: {
-          matchedListingId: listingId,
+          matchedOrderId: reservation.orderId,
           status: BuyRequestStatus.MATCHED,
         },
-        select: { id: true, matchedOrderId: true },
+        select: { id: true },
       });
-      const order = request?.matchedOrderId
-        ? await this.prisma.order.findUnique({
-            where: { id: request.matchedOrderId },
-            select: { id: true, listingId: true, status: true },
-          })
-        : null;
 
-      // Paid at the buzzer but the webhook hook didn't finish? Fulfil, not expire.
-      if (order && order.status !== OrderStatus.PENDING_PAYMENT) {
-        if (order.status === OrderStatus.PAID) {
-          await this.onOrderPaid(order);
-          continue;
-        }
-        // Order already EXPIRED via webhook: it released its unit there, so the
-        // listing only needs un-reserving here, without a second decrement.
-        await this.prisma.$transaction(async (tx) => {
-          await tx.listing.updateMany({
-            where: { id: listingId, status: ListingStatus.RESERVED },
-            data: {
-              status: ListingStatus.ACTIVE,
-              reservedForId: null,
-              reservedUntil: null,
-            },
-          });
-          if (request) {
-            await tx.buyRequest.updateMany({
-              where: { id: request.id, status: BuyRequestStatus.MATCHED },
-              data: {
-                status: BuyRequestStatus.ACTIVE,
-                matchedListingId: null,
-                matchedOrderId: null,
-                matchedAt: null,
-              },
-            });
-          }
-        });
-        this.logger.log(
-          `Auto-buy reservation cleared on listing ${listingId} (order already ${order.status})`,
+      // Paid right at the buzzer but the settle step never ran? Settle it now
+      // rather than expiring an order the buyer has already paid for.
+      if (reservation.order.status === OrderStatus.PAID) {
+        await this.inventory.commitSoldUnit(reservation.orderId);
+        await this.onOrderPaid(reservation.order);
+        this.logger.warn(
+          `Lapsed reservation on a PAID order ${reservation.orderId} — settled it late`,
         );
-        await this.tryMatchListing(listingId, request?.id);
+        continue;
+      }
+
+      // Already resolved some other way (webhook expiry, dispute, …): the row is
+      // just stale bookkeeping.
+      if (reservation.order.status !== OrderStatus.PENDING_PAYMENT) {
+        await this.prisma.listingReservation.deleteMany({
+          where: { id: reservation.id },
+        });
         continue;
       }
 
       await this.prisma.$transaction(async (tx) => {
-        if (order) {
-          await tx.order.update({
-            where: { id: order.id },
-            data: { status: OrderStatus.EXPIRED },
-          });
-        }
-        await tx.listing.updateMany({
-          where: { id: listingId, status: ListingStatus.RESERVED },
-          data: {
-            status: ListingStatus.ACTIVE,
-            reservedForId: null,
-            reservedUntil: null,
-            // give the claimed unit back — mirrors the webhook expiry path
-            ...(order ? { soldCount: { decrement: 1 } } : {}),
-          },
+        await tx.order.update({
+          where: { id: reservation.orderId },
+          data: { status: OrderStatus.EXPIRED },
         });
+        await tx.listingReservation.deleteMany({ where: { id: reservation.id } });
         if (request) {
           await tx.buyRequest.updateMany({
             where: { id: request.id, status: BuyRequestStatus.MATCHED },
@@ -396,12 +365,19 @@ export class AutoBuyService {
       });
 
       this.logger.log(
-        `AUTO-BUY RESERVATION EXPIRED: listing ${listingId} back to ACTIVE` +
-          (order ? `, order ${order.id} EXPIRED` : '') +
+        `RESERVATION EXPIRED: listing ${reservation.listingId} freed 1 unit, ` +
+          `order ${reservation.orderId} EXPIRED` +
           (request ? `, request ${request.id} back to ACTIVE` : ''),
       );
 
-      await this.tryMatchListing(listingId, request?.id);
+      const excluded = reMatch.get(reservation.listingId) ?? [];
+      if (request) excluded.push(request.id);
+      reMatch.set(reservation.listingId, excluded);
+    }
+
+    // One pass per listing — it fills every unit that just came free.
+    for (const [listingId, excluded] of reMatch) {
+      await this.tryMatchListing(listingId, excluded);
     }
   }
 
@@ -416,9 +392,9 @@ export class AutoBuyService {
   }
 
   /**
-   * Safety net: any ACTIVE request with a qualifying ACTIVE listing should have
-   * matched synchronously — catch whatever slipped through (e.g. a tryMatch
-   * crash after the listing was committed).
+   * Safety net: any ACTIVE request with a qualifying listing that still has a
+   * free unit should have matched synchronously — catch whatever slipped through
+   * (e.g. a tryMatch crash after the listing was committed).
    */
   private async safetySweep(): Promise<void> {
     const requests = await this.prisma.buyRequest.findMany({

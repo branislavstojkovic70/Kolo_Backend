@@ -1,14 +1,10 @@
 import { forwardRef, Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  ListingStatus,
-  OrderStatus,
-  Prisma,
-  WithdrawalStatus,
-} from '@prisma/client';
+import { OrderStatus, Prisma, WithdrawalStatus } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AutoBuyService } from '../buy-requests/auto-buy.service';
+import { ListingInventoryService } from '../inventory/listing-inventory.service';
 
 @Injectable()
 export class WebhooksService {
@@ -17,6 +13,7 @@ export class WebhooksService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly inventory: ListingInventoryService,
     @Inject(forwardRef(() => AutoBuyService))
     private readonly autoBuy: AutoBuyService,
   ) {}
@@ -119,9 +116,21 @@ export class WebhooksService {
         `Order ${order.id} PAID. paidAt=${paidAt.toISOString()} vestedAt=${vestedAt.toISOString()} (VESTING_DAYS=${vestingDays})`,
       );
 
-      // Auto-buy hook: a paid order that fulfils a BuyRequest marks it FULFILLED
-      // and the listing SOLD. Manual purchases fall straight through, and a
-      // failure here must never break the webhook's 200.
+      // The held unit becomes a sale: reservation gone, soldCount += 1, and the
+      // listing flips to SOLD only once its LAST unit settles. Identical for
+      // manual and auto-buy orders.
+      try {
+        await this.inventory.commitSoldUnit(order.id);
+      } catch (e) {
+        this.logger.error(
+          `Settling the listing unit failed for order ${order.id}: ${e?.message}`,
+          e?.stack,
+        );
+      }
+
+      // Auto-buy hook: a paid order that fulfils a BuyRequest marks it FULFILLED.
+      // Manual purchases fall straight through, and a failure here must never
+      // break the webhook's 200.
       try {
         await this.autoBuy.onOrderPaid(order);
       } catch (e) {
@@ -138,9 +147,9 @@ export class WebhooksService {
         where: { id: order.id },
         data: { status: OrderStatus.EXPIRED },
       });
-      // The unit this order claimed goes back on the shelf. Guarded by the
+      // The unit this order held goes back on the shelf. Guarded by the
       // PENDING_PAYMENT check above, so one order can never release twice.
-      await this.releaseListingUnit(order.listingId);
+      await this.inventory.releaseUnit(order.id);
       this.logger.log(`Order ${order.id} EXPIRED (webhook status "${status}")`);
       return;
     }
@@ -148,25 +157,6 @@ export class WebhooksService {
     this.logger.log(
       `Ignoring payment webhook status "${status}" for order ${order.id}`,
     );
-  }
-
-  /**
-   * Mirror of OrdersService.releaseUnit — an expired invoice frees the unit it
-   * claimed and brings a sold-out listing back to the marketplace.
-   */
-  private async releaseListingUnit(listingId: string) {
-    await this.prisma.listing.updateMany({
-      where: { id: listingId, soldCount: { gt: 0 } },
-      data: { soldCount: { decrement: 1 } },
-    });
-    await this.prisma.listing.updateMany({
-      where: {
-        id: listingId,
-        status: ListingStatus.SOLD_OUT,
-        soldCount: { lt: this.prisma.listing.fields.quantity },
-      },
-      data: { status: ListingStatus.ACTIVE },
-    });
   }
 
   async handlePayout(body: any): Promise<void> {

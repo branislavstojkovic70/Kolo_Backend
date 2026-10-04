@@ -430,16 +430,31 @@ const ORDERS: OrderSpec[] = [
  * Units already claimed on a listing. Mirrors the runtime rule: every order that
  * is not EXPIRED holds one unit, an expired invoice gives its unit back.
  */
+/** soldCount is SETTLED units only — unpaid orders hold theirs via a reservation. */
+const SETTLED: OrderStatus[] = [
+  OrderStatus.PAID,
+  OrderStatus.DISPUTED,
+  OrderStatus.REFUNDED,
+];
+
 const soldOf = (listingId: string) =>
   ORDERS.filter(
-    (o) => o.listingId === listingId && o.status !== OrderStatus.EXPIRED,
+    (o) => o.listingId === listingId && SETTLED.includes(o.status),
   ).length;
+
+const heldOrdersOf = (listingId: string) =>
+  ORDERS.filter(
+    (o) =>
+      o.listingId === listingId && o.status === OrderStatus.PENDING_PAYMENT,
+  );
 
 // -------------------------------------------------------------------------- wipe
 
 /** Order matters: children before parents, and Order points at Withdrawal. */
 async function wipe() {
   await prisma.webhookEvent.deleteMany();
+  await prisma.buyRequest.deleteMany();
+  await prisma.listingReservation.deleteMany();
   await prisma.dispute.deleteMany();
   await prisma.order.deleteMany();
   await prisma.withdrawal.deleteMany();
@@ -541,10 +556,11 @@ async function main() {
         deliveryInfo: l.deliveryInfo,
         quantity: l.quantity,
         soldCount: soldOf(l.id),
-        // A listing whose units are all claimed is off the marketplace.
+        // soldCount is settled units only; a listing leaves the marketplace only
+        // once every unit is paid for.
         status:
           soldOf(l.id) >= l.quantity
-            ? ListingStatus.SOLD_OUT
+            ? ListingStatus.SOLD
             : ListingStatus.ACTIVE,
         createdAt: days(l.createdDays),
         updatedAt: days(l.createdDays),
@@ -617,6 +633,27 @@ async function main() {
         updatedAt: createdAt,
       },
     });
+  }
+
+  // --- reservations ------------------------------------------------------------
+  // Each unpaid order holds one unit, so it cannot be oversold while it waits.
+  const RESERVATION_MINUTES = parseInt(
+    process.env.AUTO_BUY_RESERVATION_MINUTES ?? '15',
+    10,
+  );
+  for (const l of LISTINGS) {
+    for (const o of heldOrdersOf(l.id)) {
+      await prisma.listingReservation.create({
+        data: {
+          id: `lrsv_${o.id}`,
+          listingId: l.id,
+          buyerId: userIds[o.buyer],
+          orderId: o.id,
+          quantity: 1,
+          expiresAt: new Date(T0 + RESERVATION_MINUTES * 60_000),
+        },
+      });
+    }
   }
 
   // --- disputes ---------------------------------------------------------------

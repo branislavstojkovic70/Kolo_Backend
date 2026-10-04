@@ -187,7 +187,20 @@ const LISTINGS = [
     createdDays: -11,
   },
   {
-    // auto-buy demo: RESERVED for Tom via breq_matched_1 / ord_autobuy_1
+    // the per-unit reservation showcase: quantity 5 = 1 sold + 2 held + 2 free
+    id: 'lst_office',
+    product: 'microsoft-365-personal-12m',
+    seller: 'elena' as UserKey,
+    description:
+      'Microsoft 365 Personal for 12 months on your own Microsoft account: Word, Excel, PowerPoint and Outlook on every device, plus 1 TB of OneDrive storage.',
+    quantity: 5,
+    priceUsd: '39.00',
+    deliveryInfo:
+      'Send the e-mail on your Microsoft account. The subscription is attached to it within the hour — your existing OneDrive files stay untouched.',
+    createdDays: -9,
+  },
+  {
+    // auto-buy demo: one unit held for Tom via breq_matched_1 / ord_autobuy_1
     id: 'lst_midjourney',
     product: 'midjourney-standard-1m',
     seller: 'marcus' as UserKey,
@@ -198,7 +211,6 @@ const LISTINGS = [
     deliveryInfo:
       'Account: demo-mj@example.com / Pw: MjDemo-2026 — change the password after first login.',
     createdDays: 0,
-    reservedFor: 'tom' as UserKey,
   },
   {
     id: 'lst_adobe',
@@ -334,6 +346,35 @@ const ORDERS: OrderSpec[] = [
     note: 'buyer won the dispute — withdrawable by the BUYER',
   },
   {
+    id: 'ord_office_sold_1',
+    listingId: 'lst_office',
+    buyer: 'priya',
+    seller: 'elena',
+    status: OrderStatus.PAID,
+    paidDays: -4,
+    vestDays: 26,
+    bucket: 'vesting',
+    note: 'lst_office unit 1 of 5 — PAID, counts in soldCount',
+  },
+  {
+    id: 'ord_office_held_1',
+    listingId: 'lst_office',
+    buyer: 'tom',
+    seller: 'elena',
+    status: OrderStatus.PENDING_PAYMENT,
+    bucket: 'none',
+    note: 'lst_office — holds 1 unit while Tom pays',
+  },
+  {
+    id: 'ord_office_held_2',
+    listingId: 'lst_office',
+    buyer: 'marcus',
+    seller: 'elena',
+    status: OrderStatus.PENDING_PAYMENT,
+    bucket: 'none',
+    note: 'lst_office — holds 1 unit while Marcus pays',
+  },
+  {
     // the order breq_matched_1 produced — pay it at /api/dev/mock-pay/ord_autobuy_1
     id: 'ord_autobuy_1',
     listingId: 'lst_midjourney',
@@ -360,13 +401,29 @@ const ORDERS: OrderSpec[] = [
 // ----------------------------------------------------------------------------- main
 
 /**
- * Units already claimed on a listing. Mirrors the runtime rule: every order that
- * is not EXPIRED holds one unit, an expired invoice gives its unit back.
+ * soldCount is SETTLED units only — PAID, DISPUTED and REFUNDED orders all
+ * consumed their unit. Unpaid orders do not count here; they hold their unit
+ * through a ListingReservation instead (see heldOf), which is what makes
+ *   availableCount = quantity - soldCount - held
+ * work per unit rather than per listing.
  */
+const SETTLED: OrderStatus[] = [
+  OrderStatus.PAID,
+  OrderStatus.DISPUTED,
+  OrderStatus.REFUNDED,
+];
+
 const soldOf = (listingId: string) =>
   ORDERS.filter(
-    (o) => o.listingId === listingId && o.status !== OrderStatus.EXPIRED,
+    (o) => o.listingId === listingId && SETTLED.includes(o.status),
   ).length;
+
+/** Orders still awaiting payment — each one gets a reservation row. */
+const heldOrdersOf = (listingId: string) =>
+  ORDERS.filter(
+    (o) =>
+      o.listingId === listingId && o.status === OrderStatus.PENDING_PAYMENT,
+  );
 
 async function wipe() {
   if (
@@ -380,6 +437,7 @@ async function wipe() {
   // FK-safe order: children first.
   await prisma.webhookEvent.deleteMany();
   await prisma.buyRequest.deleteMany();
+  await prisma.listingReservation.deleteMany();
   await prisma.dispute.deleteMany();
   await prisma.order.deleteMany();
   await prisma.withdrawal.deleteMany();
@@ -447,7 +505,6 @@ async function main() {
   // --- listings ----------------------------------------------------------------
   for (const l of LISTINGS) {
     const product = products.get(l.product)!;
-    const reservedFor = 'reservedFor' in l ? l.reservedFor : undefined;
     await prisma.listing.create({
       data: {
         id: l.id,
@@ -462,17 +519,12 @@ async function main() {
         deliveryInfo: l.deliveryInfo,
         quantity: l.quantity,
         soldCount: soldOf(l.id),
-        // A reserved listing is held for its auto-buy buyer; otherwise a listing
-        // whose units are all claimed is off the marketplace.
-        status: reservedFor
-          ? ListingStatus.RESERVED
-          : soldOf(l.id) >= l.quantity
-            ? ListingStatus.SOLD_OUT
+        // Only a fully SETTLED listing leaves the marketplace. One whose
+        // remaining units are merely held stays ACTIVE and stays in the feed.
+        status:
+          soldOf(l.id) >= l.quantity
+            ? ListingStatus.SOLD
             : ListingStatus.ACTIVE,
-        reservedForId: reservedFor ? userIds[reservedFor] : null,
-        reservedUntil: reservedFor
-          ? new Date(T0 + 15 * 60_000) // fresh 15-minute payment window
-          : null,
         createdAt: days(l.createdDays),
         updatedAt: days(l.createdDays),
       },
@@ -545,6 +597,30 @@ async function main() {
     });
   }
 
+  // --- reservations -------------------------------------------------------------
+  // Every unpaid order holds exactly one unit, manual and auto-buy alike. This is
+  // what keeps a pending order from being oversold now that soldCount counts only
+  // settled units. Fresh windows so the demo has time to click through them.
+  const RESERVATION_MINUTES = parseInt(
+    process.env.AUTO_BUY_RESERVATION_MINUTES ?? '15',
+    10,
+  );
+  for (const l of LISTINGS) {
+    for (const o of heldOrdersOf(l.id)) {
+      await prisma.listingReservation.create({
+        data: {
+          id: `lrsv_${o.id}`,
+          listingId: l.id,
+          buyerId: userIds[o.buyer],
+          orderId: o.id,
+          quantity: 1,
+          expiresAt: new Date(T0 + RESERVATION_MINUTES * 60_000),
+          createdAt: days(-1),
+        },
+      });
+    }
+  }
+
   // --- disputes ----------------------------------------------------------------
   await prisma.dispute.create({
     data: {
@@ -593,7 +669,7 @@ async function main() {
     },
   });
 
-  // MATCHED with a live payment link: lst_midjourney is RESERVED for Tom and
+  // MATCHED with a live payment link: one unit of lst_midjourney is held for Tom and
   // ord_autobuy_1 awaits payment at the mock checkout.
   await prisma.buyRequest.create({
     data: {
@@ -690,6 +766,40 @@ function printSummary(
   }
   out.push('');
 
+  out.push(' LISTING INVENTORY — availableCount = quantity - soldCount - held');
+  out.push('');
+  const invHeaders = ['LISTING', 'QTY', 'SOLD', 'HELD', 'AVAIL', 'STATUS'];
+  const invRows = LISTINGS.map((l) => {
+    const sold = soldOf(l.id);
+    const held = heldOrdersOf(l.id).length;
+    return [
+      l.id,
+      String(l.quantity),
+      String(sold),
+      String(held),
+      String(l.quantity - sold - held),
+      sold >= l.quantity ? 'SOLD' : 'ACTIVE',
+    ];
+  });
+  const invW = invHeaders.map((_, i) =>
+    Math.max(...[invHeaders, ...invRows].map((r) => r[i].length)),
+  );
+  const invLine = (cells: string[]) =>
+    cells
+      .map((c, i) => (i === 0 || i === 5 ? c.padEnd(invW[i]) : c.padStart(invW[i])))
+      .join('  ');
+  out.push('   ' + invLine(invHeaders));
+  out.push('   ' + invW.map((w) => '-'.repeat(w)).join('  '));
+  for (const r of invRows) out.push('   ' + invLine(r));
+  out.push('');
+  out.push(
+    '   lst_office is the per-unit showcase: 1 sold, 2 held by different buyers, 2 free.',
+  );
+  out.push(
+    '   It stays ACTIVE and in the public feed the whole time — reservations are per unit.',
+  );
+  out.push('');
+
   // Mirrors GET /api/stats/savings: PAID + DISPUTED orders only, retail snapshot
   // minus what the buyer paid. REFUNDED / PENDING / EXPIRED count for nothing.
   out.push(
@@ -742,13 +852,13 @@ function printSummary(
     '   breq_active_1   ACTIVE   Disney+ 12m @ ≤ $100 — list that product cheap and it fires',
   );
   out.push(
-    '   breq_matched_1  MATCHED  Midjourney @ ≤ $20 → ord_autobuy_1, lst_midjourney RESERVED for 15 min',
+    '   breq_matched_1  MATCHED  Midjourney @ ≤ $20 → ord_autobuy_1, 1 unit of lst_midjourney held 15 min',
   );
   out.push(
     `   Pay the matched order: ${PUBLIC_API_URL}/api/dev/mock-pay/ord_autobuy_1`,
   );
   out.push(
-    '   (unpaid, the cron expires it after 15 min, relists the listing and re-arms the wish)',
+    '   (unpaid, the cron expires it after 15 min, frees the unit and re-arms the wish)',
   );
   out.push('');
   out.push(

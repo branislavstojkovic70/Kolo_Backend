@@ -15,11 +15,10 @@ enum Role {
 enum ListingStatus {
   ACTIVE
   PAUSED
+  // legacy: superseded by availableCount (see ListingReservation). No code path
+  // writes it any more; kept so pre-existing rows/clients stay readable.
   SOLD_OUT
-  // held for an auto-buy buyer until reservedUntil — invisible in the public
-  // feed and not manually buyable while in this state
-  RESERVED
-  // an auto-buy order on this listing was paid
+  // every unit has been paid for: soldCount == quantity
   SOLD
   DELETED
 }
@@ -84,7 +83,7 @@ model User {
   role             Role    @default(USER)
 
   listings         Listing[]
-  reservedListings Listing[]    @relation("reservedListings")
+  reservations     ListingReservation[]
   buyRequests      BuyRequest[]
   purchases        Order[]      @relation("buyer")
   sales            Order[]      @relation("seller")
@@ -115,19 +114,15 @@ model Listing {
   priceUsd     Decimal       @db.Decimal(18, 2)
   // shown to the buyer only after payment (credentials, instructions, contact)
   deliveryInfo String?
-  // how many times this can be sold, and how many units are already claimed.
-  // A unit is claimed the moment an order is created and released if it expires;
-  // soldCount == quantity flips the listing to SOLD_OUT and off the marketplace.
+  // how many units exist, and how many have been PAID for. soldCount only ever
+  // counts settled units; unpaid orders hold their unit through a
+  // ListingReservation instead. See the availableCount rule in CLAUDE.md §3.
   quantity     Int           @default(1)
   soldCount    Int           @default(0)
   status       ListingStatus @default(ACTIVE)
-  // auto-buy reservation: who the listing is held for and until when. Set when a
-  // BuyRequest matches, cleared on payment (→ SOLD) or expiry (→ back to ACTIVE).
-  reservedUntil DateTime?
-  reservedForId String?
-  reservedFor   User?         @relation("reservedListings", fields: [reservedForId], references: [id])
   orders       Order[]
   buyRequests  BuyRequest[]
+  reservations ListingReservation[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -174,6 +169,8 @@ model Order {
 
   // the buy request this order fulfils, if it came from auto-buy
   buyRequests BuyRequest[]
+  // the listing unit this order is holding while it is unpaid (at most one)
+  reservation ListingReservation?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -220,6 +217,32 @@ model Withdrawal {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// One unit of a listing held for one buyer while their order is unpaid. Created
+// by BOTH the manual buy and the auto-buy path, so a pending order can never be
+// oversold. A reservation is "active" while expiresAt > now AND its order is
+// still PENDING_PAYMENT; that single definition lives in
+// ListingInventoryService.ACTIVE_RESERVATION and is never re-spelled elsewhere.
+//
+//   availableCount = quantity - soldCount - sum(active reservations)
+//
+// Deleted on payment (soldCount takes over the unit) or on expiry (unit freed).
+model ListingReservation {
+  id        String   @id @default(cuid())
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id])
+  buyerId   String
+  buyer     User     @relation(fields: [buyerId], references: [id])
+  // one reservation per order, so releasing/committing by order id is exact
+  orderId   String   @unique
+  order     Order    @relation(fields: [orderId], references: [id])
+  quantity  Int      @default(1)
+  expiresAt DateTime
+
+  createdAt DateTime @default(now())
+
+  @@index([listingId, expiresAt])
 }
 
 // A standing wish: "buy <product> the moment someone lists it at or under maxPriceUsd".

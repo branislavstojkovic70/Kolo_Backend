@@ -59,11 +59,40 @@ export const LISTING = {
   category: 'Streaming',
   imageUrl: 'https://images.example.com/youtube-premium.jpg',
   priceUsd: '24.99',
+  quantity: 5,
+  soldCount: 2,
+  // quantity - soldCount - units held by unpaid orders. Gate the buy button on
+  // this, not on quantity: a listing can be ACTIVE with availableCount 0 while
+  // other buyers are paying, and free up again when their window lapses.
+  availableCount: 3,
   status: 'ACTIVE',
   createdAt: '2026-06-29T09:00:00.000Z',
   updatedAt: '2026-06-29T09:00:00.000Z',
   seller: USER_STUB,
   product: PRODUCT,
+};
+
+/** GET /api/listings/mine additionally shows which units are held, and by whom. */
+export const LISTING_MINE = {
+  ...LISTING,
+  reservations: [
+    {
+      id: 'lrsv_ord_office_held_1',
+      buyerId: 'cmf3user0004q1x8tombecker',
+      buyerUsername: 'Tom Becker',
+      orderId: 'ord_office_held_1',
+      quantity: 1,
+      expiresAt: '2026-10-05T10:15:00.000Z',
+    },
+  ],
+};
+
+export const LISTING_MINE_PAGE = {
+  items: [LISTING_MINE],
+  total: 9,
+  page: 1,
+  limit: 20,
+  pages: 1,
 };
 
 export const LISTING_STATS = {

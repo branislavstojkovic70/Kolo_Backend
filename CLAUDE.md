@@ -93,6 +93,41 @@ Balance buckets returned to the FE:
 - `withdrawing` — linked to a withdrawal that is `PENDING` or `PROCESSING`
 - `withdrawn` — linked to a `COMPLETED` withdrawal
 
+### The other source of truth: listing inventory
+
+A listing sells `quantity` units. Reservations are **per unit**, so several buyers can be
+paying for different units of the same listing at the same time:
+
+```
+availableCount = quantity - soldCount - sum(active reservations)
+```
+
+- `soldCount` counts **paid** units only (`PAID` / `DISPUTED` / `REFUNDED` — a refund after a
+  lost dispute does not put the goods back on the shelf).
+- An **unpaid** order holds its unit with a `ListingReservation` row instead. A reservation is
+  *active* while `expiresAt > now()` **and** its order is still `PENDING_PAYMENT`, so a unit
+  frees itself the moment the window lapses, even before the cron tidies the row up.
+- A listing is buyable by anyone while `availableCount > 0`, no matter how many of its other
+  units are reserved. There is no "reserved listing" state — a partially reserved listing is
+  simply `ACTIVE` and stays in the feed.
+- `status = SOLD` only once `soldCount == quantity`, i.e. every unit is actually paid for.
+
+**The invariant: `soldCount + active reservations` must NEVER exceed `quantity`.** Two
+concurrent buyers on a one-unit listing must produce exactly one order.
+
+This rule is implemented **once**, in `ListingInventoryService` (`modules/inventory/`), which
+is the only place allowed to touch `soldCount` or the reservation table. Claims go through
+`lockAndAssertUnitAvailable` + `reserveUnit`; the manual buy and the auto-buy matcher both use
+exactly that path. Do not re-derive availability anywhere else.
+
+Concurrency, concretely: a claim opens a transaction, takes `SELECT … FOR UPDATE` on the
+listing row, and only *then* reads availability. Concurrent claims on one listing therefore
+serialize, and because Postgres' default `READ COMMITTED` gives each statement a fresh
+snapshot, the loser's availability read happens after the winner commits and sees its
+reservation. (A conditional `updateMany` cannot express `availableCount >= 1` — the held units
+live in another table — and a raw `UPDATE` with a correlated subquery would depend on
+EvalPlanQual subquery re-evaluation, which is too subtle for money logic.)
+
 ### Vesting
 
 - `VESTING_DAYS` env, default `30`.
@@ -156,7 +191,7 @@ would return 400.
 
 ```prisma
 enum Role            { USER ADMIN }
-enum ListingStatus   { ACTIVE PAUSED SOLD_OUT RESERVED SOLD DELETED }
+enum ListingStatus   { ACTIVE PAUSED SOLD_OUT SOLD DELETED }   // SOLD_OUT is legacy, never written
 enum BuyRequestStatus{ ACTIVE MATCHED FULFILLED CANCELLED EXPIRED }
 enum OrderStatus     { PENDING_PAYMENT PAID DISPUTED REFUNDED EXPIRED }
 enum DisputeStatus   { OPEN RESOLVED_BUYER RESOLVED_SELLER }
@@ -211,10 +246,10 @@ model Listing {
   // shown to the buyer only after payment (credentials, instructions, contact)
   deliveryInfo String?
   status      ListingStatus @default(ACTIVE)
-  // auto-buy reservation (status RESERVED): held for this buyer until this moment
-  reservedUntil DateTime?
-  reservedForId String?
+  quantity    Int           @default(1)   // how many units exist
+  soldCount   Int           @default(0)   // units PAID for (never counts unpaid orders)
   orders      Order[]
+  reservations ListingReservation[]
 
   @@index([status, createdAt])
   @@index([sellerId])
@@ -294,6 +329,24 @@ model Withdrawal {
   orders   Order[]
 }
 
+// One unit of a listing held for one buyer while their order is unpaid. Created by
+// BOTH the manual buy and the auto-buy matcher, so a pending order can never be
+// oversold. "Active" = expiresAt > now AND its order is still PENDING_PAYMENT.
+model ListingReservation {
+  id        String   @id @default(cuid())
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id])
+  buyerId   String
+  buyer     User     @relation(fields: [buyerId], references: [id])
+  orderId   String   @unique       // one reservation per order
+  order     Order    @relation(fields: [orderId], references: [id])
+  quantity  Int      @default(1)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([listingId, expiresAt])
+}
+
 // auto-buy: a standing wish "buy <product> at or below maxPriceUsd"
 model BuyRequest {
   id          String           @id @default(cuid())
@@ -355,6 +408,7 @@ src/
     products/    products.module.ts products.controller.ts products.service.ts  # catalog, synced from prisma/products.json on boot
     listings/    listings.module.ts listings.controller.ts listings.service.ts dto/
     orders/      orders.module.ts  orders.controller.ts  orders.service.ts  dto/
+    inventory/   inventory.module.ts listing-inventory.service.ts  # availableCount + the claim lock
     buy-requests/ buy-requests.module.ts buy-requests.controller.ts buy-requests.service.ts auto-buy.service.ts dto/  # auto-buy
     stats/       stats.module.ts   stats.controller.ts   stats.service.ts   # buyer savings
     wallet/      wallet.module.ts  wallet.controller.ts  wallet.service.ts  dto/
@@ -388,12 +442,19 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
 
 ### Listings
 - `GET  /api/listings` **(public)** → `?search=&category=&minPrice=&maxPrice=&sort=&page=&limit=`
-  — only `ACTIVE`, **never** returns `deliveryInfo`. `sort` is
-  `newest` (default) | `oldest` | `price_asc` | `price_desc`.
+  — only `ACTIVE` listings that still have a free unit (`availableCount > 0`), **never**
+  returns `deliveryInfo`. `sort` is `newest` (default) | `oldest` | `price_asc` | `price_desc`.
+  A listing whose remaining units are all held by buyers mid-payment drops out of the feed and
+  returns when those reservations lapse.
 - `GET  /api/listings/stats` **(public)** → `{ total, categories[], catalogueValueUsd, medianPriceUsd }`
   — counted over every `ACTIVE` listing in SQL. The FE must not average a page of results instead.
-- `GET  /api/listings/:id` **(public)** — no `deliveryInfo`
-- `GET  /api/listings/mine` → same filters as the public feed, paginated (includes `PAUSED`)
+- `GET  /api/listings/:id` **(public)** — no `deliveryInfo`. Deliberately still returns a
+  listing with `availableCount: 0`: a deep link must render "fully reserved", not 404 for
+  fifteen minutes and then work again. The FE gates its buy button on `availableCount`.
+- `GET  /api/listings/mine` → same filters as the public feed, paginated (includes `PAUSED`).
+  Also returns `reservations[]` — `{ id, buyerId, buyerUsername, orderId, quantity, expiresAt }`
+  per held unit — so a seller can see why `availableCount` is below `quantity - soldCount`.
+- **Every** listing response carries `availableCount` alongside `quantity` and `soldCount`.
 - `POST /api/listings` → `{ productId, description, imageUrl?, priceUsd, quantity?, deliveryInfo? }`
   - `productId` must be an **active catalog product** — unknown or inactive → 400.
     `title` and `category` are copied from the product at write time; they are no longer
@@ -402,6 +463,8 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
     product image. We store the link and nothing else — no uploads, no hosting, no resizing.
 - `PATCH /api/listings/:id` (owner only) — may change `description`, `priceUsd`,
   `deliveryInfo` (plus `imageUrl` / `quantity` / `status`) — **never** `productId`.
+  `status` accepts only `ACTIVE` / `PAUSED`; `SOLD` / `DELETED` are the system's.
+  Lowering `quantity` below `soldCount + held units` is a 400 — those buyers may still pay.
 - `DELETE /api/listings/:id` (owner only → status `DELETED`)
 - Every listing read also embeds `product`
   `{ id, slug, name, category, retailPriceUsd, imageUrl }` for the struck-through retail price.
@@ -409,6 +472,9 @@ All routes prefixed `/api`. `401` if no valid Clerk token unless marked public.
 ### Orders
 - `POST /api/orders` → `{ listingId }`
   - reject if buyer === seller, or listing not `ACTIVE`
+  - **claims one unit and creates a `ListingReservation`** for
+    `AUTO_BUY_RESERVATION_MINUTES`, so an unpaid order cannot be oversold. Other units of the
+    same listing stay on sale. No free unit → `400` ("sold out or fully reserved").
   - compute fee, create order `PENDING_PAYMENT`, call OxaPay invoice, store
     `oxapayTrackId` + `paymentUrl`, return `{ order, paymentUrl }`
   - copies `productId` from the listing and snapshots `retailPriceUsdSnapshot` from the
@@ -445,22 +511,26 @@ minute-cron (`@nestjs/schedule`, gated by `AUTO_BUY_ENABLED`) only cleans up exp
 reservations/requests and re-matches as a safety net. The buyer pays the OxaPay invoice
 themselves — there is **no** internal deposit balance.
 
-The flow on a match (all claims are conditional `updateMany`s — a lost race aborts cleanly):
+A match claims **one unit**, exactly like a manual buy — so a multi-unit listing can satisfy
+several waiting wishes at once, FIFO, until its units run out. The flow, all in one
+transaction (lost race → clean abort, no order):
 
-1. Listing `ACTIVE → RESERVED` (+1 unit claimed), `reservedForId` = buyer,
-   `reservedUntil = now + AUTO_BUY_RESERVATION_MINUTES` (default 15).
-2. Order created through the **same** shared path as `POST /api/orders`
+1. `ListingInventoryService.lockAndAssertUnitAvailable` — row lock, then availability.
+2. BuyRequest `ACTIVE → MATCHED` via conditional `updateMany` (never double-matched).
+3. Order created through the **same** shared path as `POST /api/orders`
    (`OrdersService.createPendingOrderRow` + `attachInvoice`) — same fee, same snapshots.
-3. BuyRequest `ACTIVE → MATCHED` with `matchedListingId` / `matchedOrderId` / `matchedAt`.
-4. Invoice failure rolls the match back (listing + request `ACTIVE` again, order stays
-   `PENDING_PAYMENT` with null trackId). A listing is never left stuck in `RESERVED`.
-5. Paid webhook → `AutoBuyService.onOrderPaid` (the one hook): request `FULFILLED`,
-   listing `SOLD`, reservation cleared. Unpaid past `reservedUntil` → cron: order `EXPIRED`,
-   listing back to `ACTIVE`, request back to `ACTIVE`, then matching re-runs immediately.
+4. `reserveUnit` — the `ListingReservation` holding that unit until
+   `now + AUTO_BUY_RESERVATION_MINUTES` (default 15; governs manual buys too).
+5. Invoice failure rolls it back: unit released, wish back to `ACTIVE`, order stays
+   `PENDING_PAYMENT` with a null trackId. A unit is never left held with no live invoice.
+6. Paid webhook → the unit settles (`soldCount += 1`, `SOLD` only if it was the last unit),
+   then `AutoBuyService.onOrderPaid` (the one hook) marks the wish `FULFILLED`.
+7. Unpaid past `expiresAt` → cron: order `EXPIRED`, unit freed, wish back to `ACTIVE`, and
+   matching re-runs for that listing (the lapsed wish is skipped on that immediate pass so
+   the next buyer in line gets first refusal).
 
-A `RESERVED` listing is invisible in the public feed, rejected by `POST /api/orders` (400),
-and its status/deletion are locked for the seller until the reservation resolves. It stays
-visible in `GET /api/listings/mine` with `reservedUntil` / `reservedForId`.
+The listing itself never changes status for a reservation: it stays `ACTIVE`, stays in the
+feed while `availableCount > 0`, and remains manually buyable unit-by-unit.
 
 - `POST   /api/buy-requests` → `{ productId, maxPriceUsd, expiresAt? }` — 400 unknown/inactive
   product, 409 if the buyer already has an `ACTIVE` request for that product. Matches
@@ -683,7 +753,8 @@ TELEGRAM_BOT_TOKEN=xxx                   # bot that posts updates into the group
 TELEGRAM_BOT_USERNAME=my_escrow_bot
 TELEGRAM_ADMIN_USERNAMES=admin1,admin2   # added + promoted to admin in every dispute group
 
-AUTO_BUY_RESERVATION_MINUTES=15   # how long a matched listing is held while the buyer pays
+AUTO_BUY_RESERVATION_MINUTES=15   # how long a claimed UNIT is held while the buyer pays
+                                  # (applies to manual buys and auto-buy matches alike)
 AUTO_BUY_ENABLED=true             # gates the auto-buy cleanup cron
 VESTING_DAYS=30
 DISPUTE_WINDOW_DAYS=30
@@ -791,12 +862,18 @@ clickable from `/docs` — hit **Authorize**, put the e-mail in the `dev-bypass`
    the money left Elena's `disputed` bucket and appeared in Priya's `available` one,
    withdrawable right away. No OxaPay refund call — the buyer withdraws like a seller.
 10. **Auto-buy** — as Tom: `GET /api/buy-requests/mine` shows a `MATCHED` wish with a live
-    payment link (`ord_autobuy_1`, `lst_midjourney` is `RESERVED`) and an `ACTIVE` one for
+    payment link (`ord_autobuy_1`, one unit of `lst_midjourney` held) and an `ACTIVE` one for
     Disney+. Pay the matched order at `/api/dev/mock-pay/ord_autobuy_1` → wish `FULFILLED`,
-    listing `SOLD`, Marcus's wallet fills like any sale. Or list Disney+ 12m under $100 as
-    any seller → an order + payment link appear for Tom automatically, the listing goes
-    `RESERVED`. Left unpaid, the minute-cron expires the reservation and re-arms everything.
-11. **Numbers** — `GET /api/admin/stats` for the closing slide.
+    the unit settles and that one-unit listing goes `SOLD`. Or list Disney+ 12m under $100 as
+    any seller → an order + payment link appear for Tom automatically. Left unpaid, the
+    minute-cron frees the unit and re-arms everything.
+11. **Units are reserved, not listings** — `GET /api/listings/mine` as Elena: `lst_office` is
+    `quantity 5`, `soldCount 1`, `availableCount 2`, with two `reservations` held by two
+    different buyers. It is still `ACTIVE` and still in the public feed, and a third buyer can
+    buy one of the two free units right now. Pay one reservation → `soldCount 2`; let one
+    lapse → `availableCount 3`. A one-unit listing behaves as before: first buyer wins, the
+    rest get `400`.
+12. **Numbers** — `GET /api/admin/stats` for the closing slide.
 
 If Telegram is configured, step 8's group is created for the admins + bot, and step 9 posts
 the outcome into it. If it isn't, everything above still works; the invite link is `null`.
