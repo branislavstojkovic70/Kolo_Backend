@@ -76,13 +76,25 @@ export class ClerkAuthGuard implements CanActivate {
 
     if (existing) {
       const role = this.roleFor(existing.email, existing.role);
-      if (role !== existing.role) {
-        return this.prisma.user.update({
-          where: { id: existing.id },
-          data: { role },
-        });
+      // Rows adopted from the seed may predate the Clerk profile — backfill
+      // the avatar/name from Clerk once; after that this path never hits the API.
+      const needsBackfill = !existing.imageUrl || !existing.username;
+      if (role === existing.role && !needsBackfill) return existing;
+
+      let { username, imageUrl } = existing;
+      if (needsBackfill) {
+        const clerkUser = await this.clerk.users.getUser(clerkUserId);
+        username =
+          username ||
+          clerkUser.username ||
+          [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(' ') ||
+          null;
+        imageUrl = imageUrl || clerkUser.imageUrl || null;
       }
-      return existing;
+      return this.prisma.user.update({
+        where: { id: existing.id },
+        data: { role, username, imageUrl },
+      });
     }
 
     let email: string | undefined =
@@ -138,8 +150,10 @@ export class ClerkAuthGuard implements CanActivate {
         data: {
           clerkUserId,
           role: role === Role.ADMIN ? Role.ADMIN : byEmail.role,
-          username: byEmail.username ?? extras.username ?? undefined,
-          imageUrl: byEmail.imageUrl ?? extras.imageUrl ?? undefined,
+          // The live Clerk profile (Google photo, real name) beats whatever
+          // the seed or a dev-bypass session wrote into the adopted row.
+          username: extras.username ?? byEmail.username ?? undefined,
+          imageUrl: extras.imageUrl ?? byEmail.imageUrl ?? undefined,
         },
       });
     }

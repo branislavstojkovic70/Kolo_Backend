@@ -67,10 +67,10 @@ const USERS = {
     telegramUsername: 'kolo_admin',
     role: Role.ADMIN,
   },
-  elena: {
-    email: 'elena.petrova@example.com',
-    username: 'Elena Petrova',
-    telegramUsername: 'elena_digital',
+  bane: {
+    email: 'bangiekg@gmail.com',
+    username: 'Branislav Stojkovic',
+    telegramUsername: 'bangiekg',
     role: Role.USER,
   },
   marcus: {
@@ -105,7 +105,7 @@ const LISTINGS = [
   {
     id: 'lst_youtube',
     product: 'youtube-premium-12m',
-    seller: 'elena' as UserKey,
+    seller: 'bane' as UserKey,
     description:
       'Family-plan invite for the Google account you already use. Ad-free video, background play and YouTube Music for a full year. No password sharing, nothing to install, works worldwide.',
     quantity: 5,
@@ -117,7 +117,7 @@ const LISTINGS = [
   {
     id: 'lst_spotify',
     product: 'spotify-premium-6m',
-    seller: 'elena' as UserKey,
+    seller: 'bane' as UserKey,
     description:
       'Six prepaid months of Spotify Premium on your existing account. Your playlists, follows and listening history all stay exactly where they are.',
     quantity: 4,
@@ -129,7 +129,7 @@ const LISTINGS = [
   {
     id: 'lst_canva',
     product: 'canva-pro-12m',
-    seller: 'elena' as UserKey,
+    seller: 'bane' as UserKey,
     description:
       'Canva Pro added to your own login for 12 months: 100M+ premium assets, Brand Kit, Magic Resize and the background remover.',
     quantity: 3,
@@ -190,7 +190,7 @@ const LISTINGS = [
     // the per-unit reservation showcase: quantity 5 = 1 sold + 2 held + 2 free
     id: 'lst_office',
     product: 'microsoft-365-personal-12m',
-    seller: 'elena' as UserKey,
+    seller: 'bane' as UserKey,
     description:
       'Microsoft 365 Personal for 12 months on your own Microsoft account: Word, Excel, PowerPoint and Outlook on every device, plus 1 TB of OneDrive storage.',
     quantity: 5,
@@ -261,7 +261,7 @@ const ORDERS: OrderSpec[] = [
   {
     id: 'ord_pending_2',
     listingId: 'lst_notion',
-    buyer: 'tom',
+    buyer: 'bane',
     seller: 'priya',
     status: OrderStatus.PENDING_PAYMENT,
     bucket: 'none',
@@ -271,7 +271,7 @@ const ORDERS: OrderSpec[] = [
     id: 'ord_vesting_1',
     listingId: 'lst_youtube',
     buyer: 'tom',
-    seller: 'elena',
+    seller: 'bane',
     status: OrderStatus.PAID,
     paidDays: -2,
     vestDays: 28,
@@ -282,7 +282,7 @@ const ORDERS: OrderSpec[] = [
     id: 'ord_vesting_2',
     listingId: 'lst_canva',
     buyer: 'priya',
-    seller: 'elena',
+    seller: 'bane',
     status: OrderStatus.PAID,
     paidDays: -12,
     vestDays: 18,
@@ -292,7 +292,7 @@ const ORDERS: OrderSpec[] = [
   {
     id: 'ord_vesting_3',
     listingId: 'lst_chatgpt',
-    buyer: 'tom',
+    buyer: 'bane',
     seller: 'marcus',
     status: OrderStatus.PAID,
     paidDays: -5,
@@ -304,7 +304,7 @@ const ORDERS: OrderSpec[] = [
     id: 'ord_available_1',
     listingId: 'lst_spotify',
     buyer: 'tom',
-    seller: 'elena',
+    seller: 'bane',
     status: OrderStatus.PAID,
     paidDays: -45,
     vestDays: -15,
@@ -326,7 +326,7 @@ const ORDERS: OrderSpec[] = [
     id: 'ord_disputed_1',
     listingId: 'lst_spotify',
     buyer: 'priya',
-    seller: 'elena',
+    seller: 'bane',
     status: OrderStatus.DISPUTED,
     paidDays: -6,
     vestDays: 24,
@@ -336,12 +336,12 @@ const ORDERS: OrderSpec[] = [
   {
     id: 'ord_refunded_1',
     listingId: 'lst_netflix',
-    buyer: 'elena',
+    buyer: 'bane',
     seller: 'marcus',
     status: OrderStatus.REFUNDED,
     paidDays: -20,
     vestDays: -1,
-    beneficiary: 'elena',
+    beneficiary: 'bane',
     bucket: 'available',
     note: 'buyer won the dispute — withdrawable by the BUYER',
   },
@@ -349,7 +349,7 @@ const ORDERS: OrderSpec[] = [
     id: 'ord_office_sold_1',
     listingId: 'lst_office',
     buyer: 'priya',
-    seller: 'elena',
+    seller: 'bane',
     status: OrderStatus.PAID,
     paidDays: -4,
     vestDays: 26,
@@ -360,7 +360,7 @@ const ORDERS: OrderSpec[] = [
     id: 'ord_office_held_1',
     listingId: 'lst_office',
     buyer: 'tom',
-    seller: 'elena',
+    seller: 'bane',
     status: OrderStatus.PENDING_PAYMENT,
     bucket: 'none',
     note: 'lst_office — holds 1 unit while Tom pays',
@@ -369,7 +369,7 @@ const ORDERS: OrderSpec[] = [
     id: 'ord_office_held_2',
     listingId: 'lst_office',
     buyer: 'marcus',
-    seller: 'elena',
+    seller: 'bane',
     status: OrderStatus.PENDING_PAYMENT,
     bucket: 'none',
     note: 'lst_office — holds 1 unit while Marcus pays',
@@ -388,7 +388,7 @@ const ORDERS: OrderSpec[] = [
     id: 'ord_withdrawn_1',
     listingId: 'lst_youtube',
     buyer: 'priya',
-    seller: 'elena',
+    seller: 'bane',
     status: OrderStatus.PAID,
     paidDays: -60,
     vestDays: -30,
@@ -494,7 +494,12 @@ async function main() {
         email: u.email,
         username: u.username,
         telegramUsername: u.telegramUsername,
-        imageUrl: `https://i.pravatar.cc/160?u=${encodeURIComponent(u.email)}`,
+        // bane is a real Clerk account — leave the avatar empty so the auth
+        // guard fills it from Clerk (the Google profile photo) on first login.
+        imageUrl:
+          key === 'bane'
+            ? null
+            : `https://i.pravatar.cc/160?u=${encodeURIComponent(u.email)}`,
         role: u.role,
         createdAt: days(-70),
       },
@@ -544,7 +549,7 @@ async function main() {
   await prisma.withdrawal.create({
     data: {
       id: 'wd_completed_1',
-      userId: userIds.elena,
+      userId: userIds.bane,
       amountUsd: withdrawnAmount,
       currency: 'USDT',
       network: 'TRC20',
@@ -641,7 +646,7 @@ async function main() {
     data: {
       id: 'dsp_resolved_buyer_1',
       orderId: 'ord_refunded_1',
-      openedById: userIds.elena,
+      openedById: userIds.bane,
       reason:
         'The Netflix profile was removed from the household after nine days. The seller stopped answering.',
       status: DisputeStatus.RESOLVED_BUYER,
@@ -660,7 +665,7 @@ async function main() {
   await prisma.buyRequest.create({
     data: {
       id: 'breq_active_1',
-      buyerId: userIds.tom,
+      buyerId: userIds.bane,
       productId: products.get('disney-plus-premium-12m')!.id,
       maxPriceUsd: new Prisma.Decimal('100.00'),
       status: BuyRequestStatus.ACTIVE,
@@ -696,7 +701,7 @@ function printSummary(
   buyerAmounts: Map<string, Prisma.Decimal>,
   productOf: (listingId: string) => { retail: Prisma.Decimal },
 ) {
-  const keys: UserKey[] = ['admin', 'elena', 'marcus', 'priya', 'tom'];
+  const keys: UserKey[] = ['admin', 'bane', 'marcus', 'priya', 'tom'];
   const buckets: Bucket[] = [
     'available',
     'vesting',
@@ -830,7 +835,7 @@ function printSummary(
 
   out.push(' DEMO CHEAT SHEET');
   out.push(
-    `   Money in every bucket (main demo account) .. ${USERS.elena.email}`,
+    `   Money in every bucket (main demo account) .. ${USERS.bane.email}`,
   );
   out.push(
     `   One clean payout ready to withdraw ......... ${USERS.marcus.email}`,
@@ -845,9 +850,9 @@ function printSummary(
   out.push(
     '   Nothing sits in "withdrawing": that bucket fills the moment you call',
   );
-  out.push('   POST /api/wallet/withdraw as Elena or Marcus during the demo.');
+  out.push('   POST /api/wallet/withdraw as Branislav or Marcus during the demo.');
   out.push('');
-  out.push(' AUTO-BUY (as tom.becker@example.com)');
+  out.push(' AUTO-BUY (breq_active_1 belongs to Branislav; the matched one to Tom)');
   out.push(
     '   breq_active_1   ACTIVE   Disney+ 12m @ ≤ $100 — list that product cheap and it fires',
   );
