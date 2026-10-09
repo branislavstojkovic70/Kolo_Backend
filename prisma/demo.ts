@@ -109,14 +109,14 @@ const LISTINGS: ListingSpec[] = [
     id: 'lst_youtube',
     product: 'youtube-premium-12m',
     seller: 'bane',
-    title: 'YouTube Premium — 12 months on your own account',
+    title: 'YouTube Premium - 12 months on your own account',
     description:
       'Family-plan invite for the Google account you already use. Ad-free video, background play and YouTube Music for a full year. No password sharing, nothing to install, works worldwide.',
     category: 'Streaming',
     quantity: 5,
     priceUsd: '24.99',
     deliveryInfo:
-      'Send me the Gmail address on your Google account. The family invite arrives within 30 minutes — accept it and Premium is live instantly.',
+      'Send me the Gmail address on your Google account. The family invite arrives within 30 minutes. Accept it and Premium is live instantly.',
     imageUrl: 'https://picsum.photos/seed/kolo-youtube/800/500',
     createdDays: -64,
   },
@@ -124,7 +124,7 @@ const LISTINGS: ListingSpec[] = [
     id: 'lst_spotify',
     product: 'spotify-premium-6m',
     seller: 'bane',
-    title: 'Spotify Premium Individual — 6 months',
+    title: 'Spotify Premium Individual - 6 months',
     description:
       'Six prepaid months of Spotify Premium on your existing account. Your playlists, follows and listening history all stay exactly where they are.',
     category: 'Streaming',
@@ -139,7 +139,7 @@ const LISTINGS: ListingSpec[] = [
     id: 'lst_chatgpt',
     product: 'chatgpt-plus-1m',
     seller: 'bane',
-    title: 'ChatGPT Plus — 1 month on your account',
+    title: 'ChatGPT Plus - 1 month on your account',
     description:
       'One month of ChatGPT Plus applied to your own OpenAI account. Priority access at peak hours, faster responses, all the latest models.',
     category: 'AI Tools',
@@ -154,14 +154,14 @@ const LISTINGS: ListingSpec[] = [
     id: 'lst_nordvpn',
     product: 'nordvpn-24m',
     seller: 'bane',
-    title: 'NordVPN — 2 year plan, fresh account',
+    title: 'NordVPN - 2 year plan, fresh account',
     description:
       'Brand-new NordVPN account with 24 months prepaid. Six devices, Threat Protection, dedicated support. The credentials are yours to change on day one.',
     category: 'Privacy & Security',
     quantity: 1,
     priceUsd: '54.00',
     deliveryInfo:
-      'Account: kolo-nord-4417@proton.me / Pw: NordKolo-2026 — change the password right after your first login.',
+      'Account: kolo-nord-4417@proton.me / Pw: NordKolo-2026. Change the password right after your first login.',
     imageUrl: 'https://picsum.photos/seed/kolo-nordvpn/800/500',
     createdDays: -33,
   },
@@ -169,7 +169,7 @@ const LISTINGS: ListingSpec[] = [
     id: 'lst_canva',
     product: 'canva-pro-12m',
     seller: 'bane',
-    title: 'Canva Pro — 1 year, your own account',
+    title: 'Canva Pro - 1 year, your own account',
     description:
       'Canva Pro added to your own login for 12 months: 100M+ premium assets, Brand Kit, Magic Resize and the background remover.',
     category: 'Design',
@@ -184,14 +184,14 @@ const LISTINGS: ListingSpec[] = [
     id: 'lst_netflix',
     product: 'netflix-premium-3m',
     seller: 'stojkovic',
-    title: 'Netflix Premium 4K — 3 months (private profile)',
+    title: 'Netflix Premium 4K - 3 months (private profile)',
     description:
       'Your own profile on a Premium 4K household for three months. Ultra HD, four streams, downloads enabled. The profile PIN is yours alone.',
     category: 'Streaming',
     quantity: 4,
     priceUsd: '32.00',
     deliveryInfo:
-      'Login: kolo-netflix@proton.me / Pw: KoloPass-2026 — use the profile named after your order id and set your own PIN on first login.',
+      'Login: kolo-netflix@proton.me / Pw: KoloPass-2026. Use the profile named after your order id and set your own PIN on first login.',
     imageUrl: 'https://picsum.photos/seed/kolo-netflix/800/500',
     createdDays: -39,
   },
@@ -199,7 +199,7 @@ const LISTINGS: ListingSpec[] = [
     id: 'lst_notion',
     product: 'notion-plus-12m',
     seller: 'stojkovic',
-    title: 'Notion Plus — 1 year for your workspace',
+    title: 'Notion Plus - 1 year for your workspace',
     description:
       'Notion Plus applied to your existing personal workspace for 12 months: unlimited blocks, 30-day version history, 100 guests.',
     category: 'Productivity',
@@ -214,7 +214,7 @@ const LISTINGS: ListingSpec[] = [
     id: 'lst_adobe',
     product: 'adobe-cc-photography-3m',
     seller: 'stojkovic',
-    title: 'Adobe Creative Cloud Photography — 3 months',
+    title: 'Adobe Creative Cloud Photography - 3 months',
     description:
       'Lightroom + Photoshop with 20 GB of cloud storage, three months prepaid on your own Adobe ID. Desktop and mobile both included.',
     category: 'Design',
@@ -229,7 +229,7 @@ const LISTINGS: ListingSpec[] = [
     id: 'lst_office',
     product: 'microsoft-365-personal-12m',
     seller: 'uros',
-    title: 'Microsoft 365 Family — 12 months, your own seat',
+    title: 'Microsoft 365 Family - 12 months, your own seat',
     description:
       'A seat on a Microsoft 365 Family subscription for a year: Word, Excel, PowerPoint and Outlook on every device, plus 1 TB of OneDrive storage.',
     category: 'Productivity',
@@ -273,7 +273,7 @@ const ORDERS: OrderSpec[] = [
     seller: 'bane',
     status: OrderStatus.PENDING_PAYMENT,
     bucket: 'none',
-    note: 'invoice open — pay this one live during the demo',
+    note: 'invoice open - pay this one live during the demo',
   },
   {
     id: 'ord_open_2',
@@ -337,7 +337,7 @@ const ORDERS: OrderSpec[] = [
     paidDays: -20,
     vestDays: 10,
     bucket: 'vesting',
-    note: 'a purchase of yours — delivery details are unlocked on the order page',
+    note: 'a purchase of yours - delivery details are unlocked on the order page',
   },
 
   // --- vested, ready to withdraw ---------------------------------------------
@@ -385,7 +385,7 @@ const ORDERS: OrderSpec[] = [
     paidDays: -12,
     vestDays: 18,
     bucket: 'disputed',
-    note: 'OPEN dispute — frozen even once it vests',
+    note: 'OPEN dispute - frozen even once it vests',
   },
   {
     id: 'ord_refunded_1',
@@ -397,7 +397,7 @@ const ORDERS: OrderSpec[] = [
     vestDays: -17,
     beneficiary: 'bane',
     bucket: 'available',
-    note: 'you won this dispute — refund is withdrawable immediately',
+    note: 'you won this dispute - refund is withdrawable immediately',
   },
   {
     id: 'ord_dispute_won_1',
@@ -408,7 +408,7 @@ const ORDERS: OrderSpec[] = [
     paidDays: -33,
     vestDays: -3,
     bucket: 'available',
-    note: 'dispute resolved for you as the seller — original vesting clock kept',
+    note: 'dispute resolved for you as the seller - original vesting clock kept',
   },
 
   // --- already paid out -------------------------------------------------------
@@ -752,7 +752,7 @@ function printSummary(sellerAmounts: Map<string, Prisma.Decimal>) {
     '',
     ` ${LISTINGS.length} listings · ${ORDERS.length} orders · 3 disputes · 1 completed payout · platform fee ${FEE_PERCENT}%`,
     '',
-    ' WALLET BUCKETS (USD) — these match GET /api/wallet/balance exactly',
+    ' WALLET BUCKETS (USD) - these match GET /api/wallet/balance exactly',
     '',
     ' ' + line(headers),
     ' ' + widths.map((w) => '-'.repeat(w)).join('  '),
@@ -774,7 +774,7 @@ function printSummary(sellerAmounts: Map<string, Prisma.Decimal>) {
   out.push('');
   out.push(' DEMO RUNBOOK');
   out.push(
-    `   1. Sign in as ${USERS.bane.email} — wallet has money in every bucket.`,
+    `   1. Sign in as ${USERS.bane.email} - wallet has money in every bucket.`,
   );
   out.push(
     '   2. Wallet: press Withdraw. The available bucket empties into "withdrawing"',
@@ -788,7 +788,7 @@ function printSummary(sellerAmounts: Map<string, Prisma.Decimal>) {
     `      (or open ${PUBLIC_API_URL}/api/dev/mock-pay/ord_open_1 for the invoice that is already waiting).`,
   );
   out.push(
-    `   4. Sign in as ${USERS.admin.email} — Arbitration lists all three disputes.`,
+    `   4. Sign in as ${USERS.admin.email} - Arbitration lists all three disputes.`,
   );
   out.push(
     '      dsp_open_1 is the OPEN one; resolve it either way live on stage.',
@@ -802,7 +802,7 @@ function printSummary(sellerAmounts: Map<string, Prisma.Decimal>) {
   out.push(`           -H "x-dev-user-email: ${USERS.admin.email}"`);
   out.push('');
   out.push(
-    `   Nothing sits in "withdrawing" — that bucket fills the moment you press Withdraw.`,
+    `   Nothing sits in "withdrawing" - that bucket fills the moment you press Withdraw.`,
   );
   out.push(
     `   Vesting dates are fixed here; VESTING_DAYS=${process.env.VESTING_DAYS ?? '30'} only applies to orders paid from now on.`,

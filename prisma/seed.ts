@@ -111,7 +111,7 @@ const LISTINGS = [
     quantity: 5,
     priceUsd: '24.99',
     deliveryInfo:
-      'Send me the Gmail address on your Google account. The family invite arrives within 30 minutes — accept it and Premium is live instantly.',
+      'Send me the Gmail address on your Google account. The family invite arrives within 30 minutes. Accept it and Premium is live instantly.',
     createdDays: -62,
   },
   {
@@ -159,7 +159,7 @@ const LISTINGS = [
     quantity: 4,
     priceUsd: '32.00',
     deliveryInfo:
-      'Login: demo-netflix@example.com / Pw: DemoPass-2026 — use the profile named after your order id and set your own PIN on first login.',
+      'Login: demo-netflix@example.com / Pw: DemoPass-2026. Use the profile named after your order id and set your own PIN on first login.',
     createdDays: -21,
   },
   {
@@ -171,7 +171,7 @@ const LISTINGS = [
     quantity: 1,
     priceUsd: '54.00',
     deliveryInfo:
-      'Account: demo-nord@example.com / Pw: NordDemo-2026 — change the password right after your first login.',
+      'Account: demo-nord@example.com / Pw: NordDemo-2026. Change the password right after your first login.',
     createdDays: -18,
   },
   {
@@ -196,7 +196,7 @@ const LISTINGS = [
     quantity: 5,
     priceUsd: '39.00',
     deliveryInfo:
-      'Send the e-mail on your Microsoft account. The subscription is attached to it within the hour — your existing OneDrive files stay untouched.',
+      'Send the e-mail on your Microsoft account. The subscription is attached to it within the hour. Your existing OneDrive files stay untouched.',
     createdDays: -9,
   },
   {
@@ -205,11 +205,11 @@ const LISTINGS = [
     product: 'midjourney-standard-1m',
     seller: 'marcus' as UserKey,
     description:
-      'One month of Midjourney Standard on a fresh account — 15h fast GPU time, relaxed mode unlimited. Credentials handed over, the account is yours.',
+      'One month of Midjourney Standard on a fresh account: 15h fast GPU time, relaxed mode unlimited. Credentials handed over, the account is yours.',
     quantity: 1,
     priceUsd: '19.00',
     deliveryInfo:
-      'Account: demo-mj@example.com / Pw: MjDemo-2026 — change the password after first login.',
+      'Account: demo-mj@example.com / Pw: MjDemo-2026. Change the password after first login.',
     createdDays: 0,
   },
   {
@@ -309,7 +309,7 @@ const ORDERS: OrderSpec[] = [
     paidDays: -45,
     vestDays: -15,
     bucket: 'available',
-    note: 'vested 15 days ago — withdrawable now',
+    note: 'vested 15 days ago - withdrawable now',
   },
   {
     id: 'ord_available_2',
@@ -320,7 +320,7 @@ const ORDERS: OrderSpec[] = [
     paidDays: -38,
     vestDays: -8,
     bucket: 'available',
-    note: 'vested 8 days ago — withdrawable now',
+    note: 'vested 8 days ago - withdrawable now',
   },
   {
     id: 'ord_disputed_1',
@@ -331,7 +331,7 @@ const ORDERS: OrderSpec[] = [
     paidDays: -6,
     vestDays: 24,
     bucket: 'disputed',
-    note: 'OPEN dispute — frozen even once vesting passes',
+    note: 'OPEN dispute - frozen even once vesting passes',
   },
   {
     id: 'ord_refunded_1',
@@ -343,7 +343,7 @@ const ORDERS: OrderSpec[] = [
     vestDays: -1,
     beneficiary: 'bane',
     bucket: 'available',
-    note: 'buyer won the dispute — withdrawable by the BUYER',
+    note: 'buyer won the dispute - withdrawable by the BUYER',
   },
   {
     id: 'ord_office_sold_1',
@@ -354,7 +354,7 @@ const ORDERS: OrderSpec[] = [
     paidDays: -4,
     vestDays: 26,
     bucket: 'vesting',
-    note: 'lst_office unit 1 of 5 — PAID, counts in soldCount',
+    note: 'lst_office unit 1 of 5 - PAID, counts in soldCount',
   },
   {
     id: 'ord_office_held_1',
@@ -363,7 +363,7 @@ const ORDERS: OrderSpec[] = [
     seller: 'bane',
     status: OrderStatus.PENDING_PAYMENT,
     bucket: 'none',
-    note: 'lst_office — holds 1 unit while Tom pays',
+    note: 'lst_office - holds 1 unit while Tom pays',
   },
   {
     id: 'ord_office_held_2',
@@ -372,7 +372,7 @@ const ORDERS: OrderSpec[] = [
     seller: 'bane',
     status: OrderStatus.PENDING_PAYMENT,
     bucket: 'none',
-    note: 'lst_office — holds 1 unit while Marcus pays',
+    note: 'lst_office - holds 1 unit while Marcus pays',
   },
   {
     // the order breq_matched_1 produced — pay it at /api/dev/mock-pay/ord_autobuy_1
@@ -739,7 +739,7 @@ function printSummary(
   const out: string[] = [
     '',
     rule,
-    ' SEED COMPLETE — demo dataset ready',
+    ' SEED COMPLETE - demo dataset ready',
     rule,
     '',
   ];
@@ -751,7 +751,7 @@ function printSummary(
   );
   out.push('');
   out.push(
-    ' BALANCE BUCKETS (USD) — these should match GET /api/wallet/balance exactly',
+    ' BALANCE BUCKETS (USD) - these should match GET /api/wallet/balance exactly',
   );
   out.push('');
   out.push(' ' + line(headers));
@@ -771,7 +771,7 @@ function printSummary(
   }
   out.push('');
 
-  out.push(' LISTING INVENTORY — availableCount = quantity - soldCount - held');
+  out.push(' LISTING INVENTORY - availableCount = quantity - soldCount - held');
   out.push('');
   const invHeaders = ['LISTING', 'QTY', 'SOLD', 'HELD', 'AVAIL', 'STATUS'];
   const invRows = LISTINGS.map((l) => {
@@ -801,14 +801,14 @@ function printSummary(
     '   lst_office is the per-unit showcase: 1 sold, 2 held by different buyers, 2 free.',
   );
   out.push(
-    '   It stays ACTIVE and in the public feed the whole time — reservations are per unit.',
+    '   It stays ACTIVE and in the public feed the whole time. Reservations are per unit.',
   );
   out.push('');
 
   // Mirrors GET /api/stats/savings: PAID + DISPUTED orders only, retail snapshot
   // minus what the buyer paid. REFUNDED / PENDING / EXPIRED count for nothing.
   out.push(
-    ' BUYER SAVINGS — GET /api/stats/savings should match these numbers',
+    ' BUYER SAVINGS - GET /api/stats/savings should match these numbers',
   );
   const savingsStatuses: OrderStatus[] = [
     OrderStatus.PAID,
@@ -844,7 +844,7 @@ function printSummary(
     `   Buyer with two unpaid invoices ............. ${USERS.tom.email}`,
   );
   out.push(
-    `   Admin — dispute dsp_open_1 is OPEN ......... ${USERS.admin.email}`,
+    `   Admin - dispute dsp_open_1 is OPEN ......... ${USERS.admin.email}`,
   );
   out.push('');
   out.push(
@@ -854,7 +854,7 @@ function printSummary(
   out.push('');
   out.push(' AUTO-BUY (breq_active_1 belongs to Branislav; the matched one to Tom)');
   out.push(
-    '   breq_active_1   ACTIVE   Disney+ 12m @ ≤ $100 — list that product cheap and it fires',
+    '   breq_active_1   ACTIVE   Disney+ 12m @ ≤ $100 - list that product cheap and it fires',
   );
   out.push(
     '   breq_matched_1  MATCHED  Midjourney @ ≤ $20 → ord_autobuy_1, 1 unit of lst_midjourney held 15 min',
