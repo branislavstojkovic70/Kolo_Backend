@@ -15,7 +15,8 @@
     "lint": "eslint \"{src,prisma}/**/*.ts\" --fix",
     "prisma:seed": "prisma db seed",
     "demo:seed": "ts-node prisma/demo.ts",
-    "telegram:login": "ts-node scripts/telegram-login.ts"
+    "telegram:login": "ts-node scripts/telegram-login.ts",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@clerk/backend": "^3.16.13",

@@ -4,7 +4,9 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  url       = env("DATABASE_URL")
+  // migrations bypass the transaction pooler (Supabase); locally same as DATABASE_URL
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
