@@ -245,7 +245,9 @@ export class ListingsService {
         title: product.name,
         category: product.category,
         description: dto.description,
-        imageUrl: dto.imageUrl ?? product.imageUrl,
+        // only the seller's own photo — without one the frontend shows the
+        // product's brand mark as cover art, so never copy it in here
+        imageUrl: dto.imageUrl ?? null,
         priceUsd: new Prisma.Decimal(dto.priceUsd).toFixed(2),
         deliveryInfo: dto.deliveryInfo,
         quantity: dto.quantity ?? 1,

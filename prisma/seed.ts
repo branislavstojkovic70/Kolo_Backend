@@ -518,7 +518,8 @@ async function main() {
         // copied from the product, exactly like POST /api/listings does
         title: product.name,
         category: product.category,
-        imageUrl: product.imageUrl,
+        // no seller photo: the card shows the product's brand mark instead
+        imageUrl: null,
         description: l.description,
         priceUsd: new Prisma.Decimal(l.priceUsd),
         deliveryInfo: l.deliveryInfo,

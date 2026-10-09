@@ -4,104 +4,104 @@
     "name": "Netflix Premium 4K - 3 months",
     "category": "Streaming",
     "retailPriceUsd": "74.97",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=netflix.com&sz=128"
+    "imageUrl": "/brands/netflix-premium-3m.webp"
   },
   {
     "slug": "youtube-premium-12m",
     "name": "YouTube Premium - 12 months",
     "category": "Streaming",
     "retailPriceUsd": "139.99",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=youtube.com&sz=128"
+    "imageUrl": "/brands/youtube-premium-12m.webp"
   },
   {
     "slug": "spotify-premium-6m",
     "name": "Spotify Premium Individual - 6 months",
     "category": "Streaming",
     "retailPriceUsd": "71.94",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=spotify.com&sz=128"
+    "imageUrl": "/brands/spotify-premium-6m.webp"
   },
   {
     "slug": "disney-plus-premium-12m",
     "name": "Disney+ Premium - 12 months",
     "category": "Streaming",
     "retailPriceUsd": "159.99",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=disneyplus.com&sz=128"
+    "imageUrl": "/brands/disney-plus-premium-12m.webp"
   },
   {
     "slug": "chatgpt-plus-1m",
     "name": "ChatGPT Plus - 1 month",
     "category": "AI Tools",
     "retailPriceUsd": "20.00",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=chatgpt.com&sz=128"
+    "imageUrl": "/brands/chatgpt-plus-1m.webp"
   },
   {
     "slug": "claude-pro-1m",
     "name": "Claude Pro - 1 month",
     "category": "AI Tools",
     "retailPriceUsd": "20.00",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=claude.ai&sz=128"
+    "imageUrl": "/brands/claude-pro-1m.webp"
   },
   {
     "slug": "midjourney-standard-1m",
     "name": "Midjourney Standard - 1 month",
     "category": "AI Tools",
     "retailPriceUsd": "30.00",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=midjourney.com&sz=128"
+    "imageUrl": "/brands/midjourney-standard-1m.svg"
   },
   {
     "slug": "adobe-cc-photography-3m",
     "name": "Adobe Creative Cloud Photography - 3 months",
     "category": "Design",
     "retailPriceUsd": "59.97",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=adobe.com&sz=128"
+    "imageUrl": "/brands/adobe-cc-photography-3m.webp"
   },
   {
     "slug": "canva-pro-12m",
     "name": "Canva Pro - 12 months",
     "category": "Design",
     "retailPriceUsd": "119.99",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=canva.com&sz=128"
+    "imageUrl": "/brands/canva-pro-12m.webp"
   },
   {
     "slug": "figma-professional-1m",
     "name": "Figma Professional - 1 month",
     "category": "Design",
     "retailPriceUsd": "15.00",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=figma.com&sz=128"
+    "imageUrl": "/brands/figma-professional-1m.webp"
   },
   {
     "slug": "nordvpn-24m",
     "name": "NordVPN - 24 months",
     "category": "Privacy & Security",
     "retailPriceUsd": "119.76",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=nordvpn.com&sz=128"
+    "imageUrl": "/brands/nordvpn-24m.webp"
   },
   {
     "slug": "1password-individual-12m",
     "name": "1Password Individual - 12 months",
     "category": "Privacy & Security",
     "retailPriceUsd": "35.88",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=1password.com&sz=128"
+    "imageUrl": "/brands/1password-individual-12m.webp"
   },
   {
     "slug": "notion-plus-12m",
     "name": "Notion Plus - 12 months",
     "category": "Productivity",
     "retailPriceUsd": "96.00",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=notion.so&sz=128"
+    "imageUrl": "/brands/notion-plus-12m.webp"
   },
   {
     "slug": "microsoft-365-personal-12m",
     "name": "Microsoft 365 Personal - 12 months",
     "category": "Productivity",
     "retailPriceUsd": "99.99",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=microsoft.com&sz=128"
+    "imageUrl": "/brands/microsoft-365-personal-12m.svg"
   },
   {
     "slug": "xbox-game-pass-ultimate-3m",
     "name": "Xbox Game Pass Ultimate - 3 months",
     "category": "Gaming",
     "retailPriceUsd": "59.97",
-    "imageUrl": "https://www.google.com/s2/favicons?domain=xbox.com&sz=128"
+    "imageUrl": "/brands/xbox-game-pass-ultimate-3m.webp"
   }
 ]
