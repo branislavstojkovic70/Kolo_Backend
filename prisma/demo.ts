@@ -100,7 +100,7 @@ interface ListingSpec {
   /** how many units the seller offers */
   quantity: number;
   deliveryInfo: string;
-  imageUrl: string;
+  imageUrl: string | null;
   createdDays: number;
 }
 
@@ -117,7 +117,7 @@ const LISTINGS: ListingSpec[] = [
     priceUsd: '24.99',
     deliveryInfo:
       'Send me the Gmail address on your Google account. The family invite arrives within 30 minutes. Accept it and Premium is live instantly.',
-    imageUrl: 'https://picsum.photos/seed/kolo-youtube/800/500',
+    imageUrl: null,
     createdDays: -64,
   },
   {
@@ -132,7 +132,7 @@ const LISTINGS: ListingSpec[] = [
     priceUsd: '17.50',
     deliveryInfo:
       'Redeem code: SPOT-KOLO-6MON-4417. Open spotify.com/redeem while logged in, paste the code, done.',
-    imageUrl: 'https://picsum.photos/seed/kolo-spotify/800/500',
+    imageUrl: null,
     createdDays: -52,
   },
   {
@@ -147,7 +147,7 @@ const LISTINGS: ListingSpec[] = [
     priceUsd: '14.00',
     deliveryInfo:
       'Send the e-mail on your OpenAI account. The upgrade is applied within the hour and I send you a confirmation screenshot.',
-    imageUrl: 'https://picsum.photos/seed/kolo-chatgpt/800/500',
+    imageUrl: null,
     createdDays: -44,
   },
   {
@@ -162,7 +162,7 @@ const LISTINGS: ListingSpec[] = [
     priceUsd: '54.00',
     deliveryInfo:
       'Account: kolo-nord-4417@proton.me / Pw: NordKolo-2026. Change the password right after your first login.',
-    imageUrl: 'https://picsum.photos/seed/kolo-nordvpn/800/500',
+    imageUrl: null,
     createdDays: -33,
   },
   {
@@ -177,7 +177,7 @@ const LISTINGS: ListingSpec[] = [
     priceUsd: '9.00',
     deliveryInfo:
       'Reply with the e-mail on your Canva account and I send a team invite. Accept it and Pro unlocks immediately.',
-    imageUrl: 'https://picsum.photos/seed/kolo-canva/800/500',
+    imageUrl: null,
     createdDays: -25,
   },
   {
@@ -192,7 +192,7 @@ const LISTINGS: ListingSpec[] = [
     priceUsd: '32.00',
     deliveryInfo:
       'Login: kolo-netflix@proton.me / Pw: KoloPass-2026. Use the profile named after your order id and set your own PIN on first login.',
-    imageUrl: 'https://picsum.photos/seed/kolo-netflix/800/500',
+    imageUrl: null,
     createdDays: -39,
   },
   {
@@ -207,7 +207,7 @@ const LISTINGS: ListingSpec[] = [
     priceUsd: '44.00',
     deliveryInfo:
       'Send your workspace URL and the admin e-mail. Plus is applied to that workspace within a few hours.',
-    imageUrl: 'https://picsum.photos/seed/kolo-notion/800/500',
+    imageUrl: null,
     createdDays: -28,
   },
   {
@@ -222,7 +222,7 @@ const LISTINGS: ListingSpec[] = [
     priceUsd: '28.50',
     deliveryInfo:
       'Send your Adobe ID e-mail. The plan is attached to that ID and you keep every file you already have in the cloud.',
-    imageUrl: 'https://picsum.photos/seed/kolo-adobe/800/500',
+    imageUrl: null,
     createdDays: -19,
   },
   {
@@ -237,7 +237,7 @@ const LISTINGS: ListingSpec[] = [
     priceUsd: '39.00',
     deliveryInfo:
       'Send the e-mail on your Microsoft account and I add it to the family. Accept the invite and the 1 TB shows up in OneDrive right away.',
-    imageUrl: 'https://picsum.photos/seed/kolo-office/800/500',
+    imageUrl: null,
     createdDays: -13,
   },
 ];
