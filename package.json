@@ -15,7 +15,8 @@
     "lint": "eslint \"{src,prisma}/**/*.ts\" --fix",
     "prisma:seed": "prisma db seed",
     "demo:seed": "ts-node prisma/demo.ts",
-    "telegram:login": "ts-node scripts/telegram-login.ts"
+    "telegram:login": "ts-node scripts/telegram-login.ts",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@clerk/backend": "^3.16.13",
@@ -23,7 +24,7 @@
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.0.1",
-    "@nestjs/schedule": "^12.0.2",
+    "@nestjs/schedule": "^6.1.3",
     "@nestjs/swagger": "^11.4.7",
     "@prisma/client": "^6.19.3",
     "class-transformer": "^0.5.1",

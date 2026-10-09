@@ -48,6 +48,11 @@ class EnvironmentVariables {
   @IsString()
   ADMIN_EMAILS?: string;
 
+  // bearer secret for GET /api/cron/auto-buy (serverless replacement for @Cron)
+  @IsOptional()
+  @IsString()
+  CRON_SECRET?: string;
+
   @IsOptional()
   @IsString()
   NODE_ENV?: string;

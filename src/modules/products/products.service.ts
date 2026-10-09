@@ -44,6 +44,11 @@ export class ProductsService implements OnModuleInit {
    * A changed price only affects the catalog; order snapshots are untouched.
    */
   async onModuleInit() {
+    // Serverless cold starts would re-run this on every new instance, and the
+    // JSON file is not bundled into the Vercel function. There the catalog comes
+    // from `npx prisma db seed` against the production database instead.
+    if (process.env.VERCEL) return;
+
     let catalog: CatalogEntry[];
     try {
       catalog = JSON.parse(
